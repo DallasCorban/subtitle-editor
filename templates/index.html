@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Subtitle Editor</title>
+<link rel="stylesheet" href="/static/style.css?v=6">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════ TOOLBAR -->
+<header id="toolbar">
+  <div class="toolbar-left">
+    <span class="app-title">Subtitle Editor</span>
+  </div>
+
+  <div class="toolbar-center">
+    <!-- Hidden native file picker -->
+    <input id="file-picker" type="file" accept=".srt" style="display:none">
+    <button id="btn-browse" class="btn-primary">Browse…</button>
+    <span id="file-name-display" class="file-name-display">No file loaded</span>
+    <button id="btn-save" class="btn-ghost" disabled>Download SRT</button>
+    <button id="btn-save-as" class="btn-ghost" disabled>Save to path…</button>
+  </div>
+
+  <div class="toolbar-right">
+    <div id="resolve-pill" class="pill pill-idle" title="Click to connect">
+      <span class="pill-dot"></span>
+      <span id="resolve-label">DaVinci Resolve</span>
+    </div>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════════════════ SETTINGS BAR -->
+<div id="settings-bar">
+  <label class="setting-group">
+    <span>Max chars / line</span>
+    <input id="max-chars" type="number" min="10" max="120" value="42">
+  </label>
+
+  <label class="setting-group">
+    <span>Long-line mode</span>
+    <select id="format-mode">
+      <option value="two_line">Wrap to 2 lines (same cue)</option>
+      <option value="split">Split into separate cues</option>
+    </select>
+  </label>
+
+  <button id="btn-auto-format" class="btn-secondary" disabled>Auto-format all</button>
+
+  <div class="setting-sep"></div>
+
+  <button id="btn-read-resolve" class="btn-ghost" disabled title="Load subtitles from the active Resolve timeline">
+    ↓ Read from Resolve
+  </button>
+  <button id="btn-push-resolve" class="btn-ghost" disabled title="Push current text to Resolve (text edits only — for splits/merges export SRT and re-import)">
+    ↑ Push to Resolve
+  </button>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ MAIN -->
+<main id="cue-list-container">
+  <div id="empty-state">
+    <p>Load an SRT file to get started.</p>
+    <p class="hint">Click <strong>Browse…</strong> in the toolbar to open an SRT file.</p>
+  </div>
+  <!-- script-view is created dynamically by app.js -->
+</main>
+
+<!-- ═══════════════════════════════════════════════════════════ STATUS BAR -->
+<footer id="status-bar">
+  <span id="status-msg">Ready.</span>
+  <span id="cue-count"></span>
+</footer>
+
+<!-- ═══════════════════════════════════════════════════════════ SAVE-AS MODAL -->
+<div id="modal-overlay" class="hidden">
+  <div id="modal">
+    <h3>Save As</h3>
+    <input id="save-as-input" type="text" placeholder="Full path, e.g. C:\Videos\my_subs.srt" spellcheck="false">
+    <div class="modal-actions">
+      <button id="btn-modal-cancel" class="btn-ghost">Cancel</button>
+      <button id="btn-modal-save" class="btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js?v=6"></script>
+</body>
+</html>
