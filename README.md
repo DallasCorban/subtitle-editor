@@ -51,14 +51,34 @@ allow writing back to existing subtitle items, so updates flow back via
 
 ## Notes on transcription speed
 
-- **Windows / Linux with NVIDIA GPU**: uses CUDA, large-v3 model. Fast.
-- **macOS**: faster-whisper has no Metal/MPS backend, so it runs on
-  CPU. The app picks the medium model on Mac to keep things tolerable
-  (~2-5× realtime on Apple Silicon). For shorter videos this is fine;
-  for hour-long ones, expect a coffee break.
+The app picks a different transcription backend per platform so each
+machine uses the GPU it actually has:
+
+- **Windows / Linux with NVIDIA GPU**: `faster-whisper` on CUDA at
+  `large-v3` / float16. Fast.
+- **Apple Silicon Mac**: `mlx-whisper` with the
+  `mlx-community/whisper-large-v3-turbo` model on Metal. Roughly
+  10× realtime on an M2 Pro — same accuracy as `large-v3`, much
+  faster.
+- **Intel Mac**: not currently supported by mlx-whisper.
+
+The first transcription on a new machine downloads the model
+(~1.5 GB), which takes a minute or two. After that, models are
+cached and load instantly.
 
 You can override defaults via env vars before launching:
 
-- `SUBTITLE_WHISPER_MODEL` (e.g. `tiny`, `small`, `medium`, `large-v3`)
-- `SUBTITLE_WHISPER_DEVICE` (`cpu`, `cuda`, `auto`)
-- `SUBTITLE_WHISPER_COMPUTE_TYPE` (`int8`, `float16`, `float32`)
+- `SUBTITLE_WHISPER_MODEL`
+  - On Windows/Linux: a faster-whisper size — `tiny`, `small`,
+    `medium`, `large-v3`.
+  - On Mac: a HuggingFace repo name —
+    `mlx-community/whisper-large-v3-turbo`,
+    `mlx-community/whisper-medium`, etc.
+- `SUBTITLE_WHISPER_DEVICE` (faster-whisper only): `cpu`, `cuda`,
+  `auto`.
+- `SUBTITLE_WHISPER_COMPUTE_TYPE` (faster-whisper only): `int8`,
+  `float16`, `float32`.
+
+`ffmpeg` is needed by mlx-whisper to decode non-WAV inputs (mp4,
+mov, etc.). The setup script installs `imageio-ffmpeg`, which
+bundles a static ffmpeg — you don't need to install it via Homebrew.

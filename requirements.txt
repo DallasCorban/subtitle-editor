@@ -1,9 +1,16 @@
 flask>=3.0
-faster-whisper>=1.2
 
-# CUDA runtime libraries — only installed on Windows / Linux where
-# NVIDIA GPUs are usable. Skipped on macOS (no CUDA on Apple Silicon;
-# faster-whisper falls back to CPU automatically).
-nvidia-cublas-cu12 ; sys_platform != "darwin"
-nvidia-cudnn-cu12 ; sys_platform != "darwin"
+# Transcription backend depends on platform:
+#   - Apple Silicon Mac:  mlx-whisper (Metal-accelerated, ~10x realtime)
+#   - Windows / Linux:    faster-whisper (CUDA on NVIDIA, CPU fallback)
+faster-whisper>=1.2  ; sys_platform != "darwin"
+mlx-whisper>=0.4    ; sys_platform == "darwin"
+
+# mlx-whisper shells out to the `ffmpeg` binary for non-WAV input.
+# imageio-ffmpeg bundles a static ffmpeg so users don't need Homebrew.
+imageio-ffmpeg      ; sys_platform == "darwin"
+
+# CUDA runtime libraries — only on Windows/Linux where NVIDIA GPUs apply.
+nvidia-cublas-cu12  ; sys_platform != "darwin"
+nvidia-cudnn-cu12   ; sys_platform != "darwin"
 nvidia-cuda-nvrtc-cu12 ; sys_platform != "darwin"
