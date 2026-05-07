@@ -14,16 +14,40 @@ Python 3.14 may not be compatible.  All errors are caught gracefully so
 the rest of the app keeps working as a standalone SRT editor.
 """
 
+import os
 import sys
 
 _resolve = None
 _connected = False
 _error_msg = ''
 
-SCRIPTING_MODULES = (
-    r'C:\ProgramData\Blackmagic Design\DaVinci Resolve'
-    r'\Support\Developer\Scripting\Modules'
-)
+
+def _scripting_modules_path() -> str:
+    """Locate Resolve's scripting Modules directory across platforms.
+
+    Honors RESOLVE_SCRIPT_API if the launcher set it; otherwise falls back to
+    the platform-default install location.
+    """
+    env_api = os.environ.get('RESOLVE_SCRIPT_API')
+    if env_api:
+        return os.path.join(env_api, 'Modules')
+
+    if sys.platform == 'darwin':
+        return ('/Library/Application Support/Blackmagic Design/'
+                'DaVinci Resolve/Developer/Scripting/Modules')
+    if sys.platform == 'win32':
+        program_data = os.environ.get('PROGRAMDATA', r'C:\ProgramData')
+        return os.path.join(
+            program_data,
+            'Blackmagic Design', 'DaVinci Resolve',
+            'Support', 'Developer', 'Scripting', 'Modules',
+        )
+    if sys.platform.startswith('linux'):
+        return '/opt/resolve/Developer/Scripting/Modules'
+    return ''
+
+
+SCRIPTING_MODULES = _scripting_modules_path()
 
 
 # ---------------------------------------------------------------------------

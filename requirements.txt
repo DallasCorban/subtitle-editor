@@ -1,0 +1,9 @@
+flask>=3.0
+faster-whisper>=1.2
+
+# CUDA runtime libraries — only installed on Windows / Linux where
+# NVIDIA GPUs are usable. Skipped on macOS (no CUDA on Apple Silicon;
+# faster-whisper falls back to CPU automatically).
+nvidia-cublas-cu12 ; sys_platform != "darwin"
+nvidia-cudnn-cu12 ; sys_platform != "darwin"
+nvidia-cuda-nvrtc-cu12 ; sys_platform != "darwin"

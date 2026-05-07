@@ -1,24 +1,23 @@
 @echo off
 title Subtitle Editor
+cd /d "%~dp0"
 
-:: DaVinci Resolve scripting environment
+:: DaVinci Resolve scripting — point the bridge at the Windows install location.
+:: (resolve_bridge.py also has fallbacks if these vars aren't set.)
 set RESOLVE_SCRIPT_API=%PROGRAMDATA%\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting
 set RESOLVE_SCRIPT_LIB=C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll
 set PYTHONPATH=%PYTHONPATH%;%RESOLVE_SCRIPT_API%\Modules\
 
-:: CUDA DLLs for faster-whisper (cublas, cudnn, nvrtc)
-set PATH=C:\Users\ben\AppData\Roaming\Python\Python314\site-packages\nvidia\cublas\bin;%PATH%
-set PATH=C:\Users\ben\AppData\Roaming\Python\Python314\site-packages\nvidia\cudnn\bin;%PATH%
-set PATH=C:\Users\ben\AppData\Roaming\Python\Python314\site-packages\nvidia\cuda_nvrtc\bin;%PATH%
+:: CUDA DLL paths are auto-detected by transcriber.py at first use —
+:: works regardless of where Python is installed on this machine.
 
 echo Starting Subtitle Editor...
 echo.
 
-cd /d "%~dp0"
 py app.py
 
 if %errorlevel% neq 0 (
   echo.
-  echo Something went wrong. Make sure Python is installed.
+  echo Something went wrong. Make sure Python is installed and run setup.bat first.
   pause
 )

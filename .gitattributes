@@ -1,0 +1,9 @@
+# Force shell scripts to use LF line endings — CRLF would break them on macOS/Linux.
+*.sh        text eol=lf
+*.command   text eol=lf
+
+# Keep batch files as CRLF (Windows expects them).
+*.bat       text eol=crlf
+
+# Default: let git auto-detect, but normalize to LF in the repo.
+*           text=auto

@@ -6,6 +6,7 @@ Only one transcription can run at a time (the model uses ~3 GB VRAM).
 """
 
 import os
+import sys
 import threading
 import uuid
 from typing import Optional
@@ -19,6 +20,58 @@ _jobs: dict = {}  # job_id -> job state dict
 # Model management
 # ---------------------------------------------------------------------------
 
+def _model_settings() -> tuple:
+    """Pick a sensible (model_size, device, compute_type) for this machine.
+
+    - Windows / Linux with NVIDIA: large-v3 on CUDA at float16 (fast, accurate).
+    - Apple Silicon / CPU-only: medium model on CPU at int8 (acceptable speed,
+      faster-whisper has no Metal/MPS backend so CPU is the only option).
+
+    Override via env vars: SUBTITLE_WHISPER_MODEL, SUBTITLE_WHISPER_DEVICE,
+    SUBTITLE_WHISPER_COMPUTE_TYPE.
+    """
+    if sys.platform == 'darwin':
+        model_size = 'medium'
+        device = 'cpu'
+        compute_type = 'int8'
+    else:
+        model_size = 'large-v3'
+        device = 'auto'        # CUDA if available, else CPU
+        compute_type = 'float16'
+
+    return (
+        os.environ.get('SUBTITLE_WHISPER_MODEL', model_size),
+        os.environ.get('SUBTITLE_WHISPER_DEVICE', device),
+        os.environ.get('SUBTITLE_WHISPER_COMPUTE_TYPE', compute_type),
+    )
+
+
+def _setup_cuda_dll_paths() -> None:
+    """On Windows, prepend nvidia/{cublas,cudnn,cuda_nvrtc}/bin from this
+    Python's site-packages to the DLL search path. Without this,
+    faster-whisper raises 'Library cublas64_12.dll is not found'.
+
+    No-op on Mac/Linux (CUDA isn't bundled there).
+    """
+    if sys.platform != 'win32':
+        return
+
+    import site
+    seen = set()
+    site_dirs = [site.getusersitepackages(), *site.getsitepackages()]
+    for site_dir in site_dirs:
+        for sub in ('cublas', 'cudnn', 'cuda_nvrtc', 'cuda_runtime'):
+            p = os.path.join(site_dir, 'nvidia', sub, 'bin')
+            if p in seen or not os.path.isdir(p):
+                continue
+            seen.add(p)
+            os.environ['PATH'] = p + os.pathsep + os.environ.get('PATH', '')
+            try:
+                os.add_dll_directory(p)
+            except (OSError, AttributeError):
+                pass
+
+
 def _ensure_model():
     """Lazy-load the WhisperModel once, reuse across transcriptions."""
     global _model
@@ -30,12 +83,14 @@ def _ensure_model():
         if _model is not None:
             return _model
 
+        _setup_cuda_dll_paths()
         from faster_whisper import WhisperModel
 
+        model_size, device, compute_type = _model_settings()
         _model = WhisperModel(
-            "large-v3",
-            device="auto",       # CUDA if available, else CPU
-            compute_type="float16",
+            model_size,
+            device=device,
+            compute_type=compute_type,
         )
         return _model
 
