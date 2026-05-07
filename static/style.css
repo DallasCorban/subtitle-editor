@@ -120,6 +120,46 @@ button:disabled { opacity: .4; cursor: default; }
 .setting-group select:focus { outline: none; border-color: var(--accent); }
 .setting-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
 
+/* ── Timing badge ────────────────────────────────────────────────────── */
+.timing-badge {
+  font-size: 10px; font-weight: 700; text-transform: uppercase;
+  padding: 2px 8px; border-radius: 99px; letter-spacing: 0.5px;
+  margin-left: 8px;
+}
+.badge-srt  { background: var(--surface2); color: var(--text-dim); border: 1px solid var(--border); }
+.badge-word { background: #1a2e22; color: var(--success); border: 1px solid var(--success); }
+
+/* ── Transcribe bar ──────────────────────────────────────────────────── */
+#transcribe-bar {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 12px;
+  padding: 6px 16px;
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.transcribe-input {
+  width: 340px;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text);
+  padding: 5px 10px; font-size: 13px; font-family: var(--mono);
+}
+.transcribe-input:focus { outline: none; border-color: var(--accent); }
+
+/* ── Progress bar ────────────────────────────────────────────────────── */
+.progress-bar {
+  width: 140px; height: 6px;
+  background: var(--bg); border-radius: 3px;
+  overflow: hidden; flex-shrink: 0;
+}
+.progress-bar.hidden { display: none; }
+.progress-fill {
+  height: 100%; width: 0%;
+  background: var(--accent);
+  transition: width 0.4s ease;
+  border-radius: 3px;
+}
+
 /* ── Empty state ──────────────────────────────────────────────────────── */
 #empty-state {
   text-align: center; padding: 80px 20px; color: var(--text-dim);

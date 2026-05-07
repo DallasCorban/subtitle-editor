@@ -61,9 +61,30 @@ def parse_srt(content: str) -> List[SubtitleCue]:
     return cues
 
 
-def serialize_srt(cues: List[SubtitleCue]) -> str:
+def serialize_srt(cues: List[SubtitleCue], anchor_zero: bool = True) -> str:
+    """
+    Serialize cues to SRT format.
+
+    If anchor_zero is True and the first cue doesn't start at 00:00:00,
+    a tiny blank cue is prepended at time zero.  This ensures that when
+    the SRT is imported into DaVinci Resolve the subtitle track starts
+    at the very beginning of the timeline — just drag it flush to the
+    start and everything lines up, no manual alignment needed.
+    """
+    out_cues = list(cues)
+
+    if anchor_zero and out_cues:
+        first_ms = time_to_ms(out_cues[0].start_time)
+        if first_ms > 100:  # only add anchor if first cue starts after 100ms
+            out_cues.insert(0, SubtitleCue(
+                index=0,
+                start_time='00:00:00,000',
+                end_time='00:00:01,000',
+                text='[.]',  # visible anchor for timeline alignment — delete after snapping
+            ))
+
     blocks = []
-    for i, cue in enumerate(cues, 1):
+    for i, cue in enumerate(out_cues, 1):
         blocks.append(f"{i}\n{cue.start_time} --> {cue.end_time}\n{cue.text}")
     return '\n\n'.join(blocks) + '\n'
 
@@ -148,6 +169,45 @@ def format_cues_two_line(cues: List[SubtitleCue], max_chars: int) -> List[Subtit
             text=new_text,
         ))
     return result
+
+
+def seconds_to_srt_time(sec: float) -> str:
+    """Convert seconds (float) to SRT time format 'HH:MM:SS,mmm'."""
+    total_ms = max(0, round(sec * 1000))
+    return ms_to_time(total_ms)
+
+
+def generate_word_srt(words: list) -> str:
+    """
+    Generate an SRT where each cue is a single word with contiguous timing.
+
+    Each word's end time is set to the next word's start time (no gaps),
+    so DaVinci Resolve creates a continuous sequence of subtitle items.
+
+    `words` is a list of {"word": str, "start": float, "end": float}.
+    """
+    if not words:
+        return ''
+
+    cues = []
+    for i, w in enumerate(words):
+        start_sec = w['start']
+        # Contiguous: this word's end = next word's start (no gaps)
+        if i < len(words) - 1:
+            end_sec = words[i + 1]['start']
+            # But don't let end < start (shouldn't happen, but be safe)
+            if end_sec <= start_sec:
+                end_sec = w['end']
+        else:
+            end_sec = w['end']
+
+        cues.append(SubtitleCue(
+            index=i + 1,
+            start_time=seconds_to_srt_time(start_sec),
+            end_time=seconds_to_srt_time(end_sec),
+            text=w['word'],
+        ))
+    return serialize_srt(cues)
 
 
 def format_cues_split(cues: List[SubtitleCue], max_chars: int) -> List[SubtitleCue]:

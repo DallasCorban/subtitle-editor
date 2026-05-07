@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Subtitle Editor</title>
-<link rel="stylesheet" href="/static/style.css?v=6">
+<link rel="stylesheet" href="/static/style.css?v=18">
 </head>
 <body>
 
@@ -12,14 +12,14 @@
 <header id="toolbar">
   <div class="toolbar-left">
     <span class="app-title">Subtitle Editor</span>
+    <span id="timing-badge" class="timing-badge badge-srt">SRT-timed</span>
   </div>
 
   <div class="toolbar-center">
-    <!-- Hidden native file picker -->
-    <input id="file-picker" type="file" accept=".srt" style="display:none">
-    <button id="btn-browse" class="btn-primary">Browse…</button>
+    <button id="btn-browse" class="btn-ghost">Open SRT…</button>
     <span id="file-name-display" class="file-name-display">No file loaded</span>
     <button id="btn-save" class="btn-ghost" disabled>Download SRT</button>
+    <button id="btn-export-word-srt" class="btn-ghost" disabled title="Export word-level SRT for Resolve live mode">Export word SRT</button>
     <button id="btn-save-as" class="btn-ghost" disabled>Save to path…</button>
   </div>
 
@@ -53,16 +53,30 @@
   <button id="btn-read-resolve" class="btn-ghost" disabled title="Load subtitles from the active Resolve timeline">
     ↓ Read from Resolve
   </button>
-  <button id="btn-push-resolve" class="btn-ghost" disabled title="Push current text to Resolve (text edits only — for splits/merges export SRT and re-import)">
-    ↑ Push to Resolve
+  <button id="btn-push-resolve" class="btn-ghost" disabled title="Save a new versioned SRT for Resolve import">
+    💾 Save new version
   </button>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ TRANSCRIBE BAR -->
+<div id="transcribe-bar">
+  <label class="setting-group">
+    <span>Transcribe</span>
+    <input id="transcribe-path" type="text" placeholder="Path to audio or video file…" spellcheck="false" class="transcribe-input">
+  </label>
+  <button id="btn-browse-media" class="btn-ghost btn-sm" title="Browse for audio/video file">📂</button>
+  <button id="btn-transcribe" class="btn-primary">Transcribe</button>
+  <div id="transcribe-progress" class="progress-bar hidden">
+    <div id="transcribe-progress-fill" class="progress-fill"></div>
+  </div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════ MAIN -->
 <main id="cue-list-container">
   <div id="empty-state">
-    <p>Load an SRT file to get started.</p>
-    <p class="hint">Click <strong>Browse…</strong> in the toolbar to open an SRT file.</p>
+    <p>Paste a video or audio file path above and click <strong>Transcribe</strong> to get started.</p>
+    <p class="hint">The SRT will be saved automatically next to your source file.</p>
+    <p class="hint" style="margin-top:4px">Or click <strong>Open SRT…</strong> to load an existing subtitle file.</p>
   </div>
   <!-- script-view is created dynamically by app.js -->
 </main>
@@ -85,6 +99,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=6"></script>
+<script src="/static/app.js?v=18"></script>
 </body>
 </html>

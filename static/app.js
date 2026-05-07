@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════════
-   Subtitle Editor — script-flow view
+   Subtitle Editor — script-flow view with word-level timing
    ═══════════════════════════════════════════════════════════════════════ */
 'use strict';
 
@@ -10,34 +10,49 @@ let resolveOk      = false;
 let maxChars       = 42;
 let autoFormatMode = 'two_line';
 
-// Flat model (rebuilt on every render)
-let allWords       = [];      // ["hello", "world", …]
+// Flat model — each word is {word, start, end, resolveId}
+let allWords       = [];      // [{word:"hello", start:0.0, end:0.4, resolveId:null}, …]
 let breakPositions = [];      // sorted indices into allWords where a new cue starts
+let wordTimingMode = false;   // true when allWords have real Whisper timestamps
 
 // Drag
-let dragState      = null;    // { breakIdx, sourceEl }
+let dragState      = null;    // { breakIdx, sourceEl, min, max, currentTarget }
+
+// Transcription
+let transcribeJobId = null;
+let transcribePollTimer = null;
+let sourceFilePath = null;  // original media file path (for auto-saving SRT next to it)
+let srtVersion     = 0;     // incremented each time user clicks "Save new version"
 
 // ── DOM refs ───────────────────────────────────────────────────────────
-const filePicker      = document.getElementById('file-picker');
-const btnBrowse       = document.getElementById('btn-browse');
-const fileNameDisplay = document.getElementById('file-name-display');
-const btnSave         = document.getElementById('btn-save');
-const btnSaveAs       = document.getElementById('btn-save-as');
-const btnAutoFormat   = document.getElementById('btn-auto-format');
-const btnReadResolve  = document.getElementById('btn-read-resolve');
-const btnPushResolve  = document.getElementById('btn-push-resolve');
-const maxCharsInput   = document.getElementById('max-chars');
-const formatModeSelect= document.getElementById('format-mode');
-const resolvePill     = document.getElementById('resolve-pill');
-const resolveLabel    = document.getElementById('resolve-label');
-const container       = document.getElementById('cue-list-container');
-const emptyState      = document.getElementById('empty-state');
-const statusMsg       = document.getElementById('status-msg');
-const cueCountEl      = document.getElementById('cue-count');
-const modalOverlay    = document.getElementById('modal-overlay');
-const saveAsInput     = document.getElementById('save-as-input');
-const btnModalCancel  = document.getElementById('btn-modal-cancel');
-const btnModalSave    = document.getElementById('btn-modal-save');
+const btnBrowse        = document.getElementById('btn-browse');
+const fileNameDisplay  = document.getElementById('file-name-display');
+const btnSave          = document.getElementById('btn-save');
+const btnSaveAs        = document.getElementById('btn-save-as');
+const btnAutoFormat    = document.getElementById('btn-auto-format');
+const btnReadResolve   = document.getElementById('btn-read-resolve');
+const btnPushResolve   = document.getElementById('btn-push-resolve');
+const maxCharsInput    = document.getElementById('max-chars');
+const formatModeSelect = document.getElementById('format-mode');
+const resolvePill      = document.getElementById('resolve-pill');
+const resolveLabel     = document.getElementById('resolve-label');
+const container        = document.getElementById('cue-list-container');
+const emptyState       = document.getElementById('empty-state');
+const statusMsg        = document.getElementById('status-msg');
+const cueCountEl       = document.getElementById('cue-count');
+const modalOverlay     = document.getElementById('modal-overlay');
+const saveAsInput      = document.getElementById('save-as-input');
+const btnModalCancel   = document.getElementById('btn-modal-cancel');
+const btnModalSave     = document.getElementById('btn-modal-save');
+
+// Transcription DOM refs
+const transcribePath   = document.getElementById('transcribe-path');
+const btnBrowseMedia   = document.getElementById('btn-browse-media');
+const btnTranscribe    = document.getElementById('btn-transcribe');
+const transcribeBar    = document.getElementById('transcribe-progress');
+const transcribeFill   = document.getElementById('transcribe-progress-fill');
+const btnExportWordSrt = document.getElementById('btn-export-word-srt');
+const timingBadge      = document.getElementById('timing-badge');
 
 // ── Toast ──────────────────────────────────────────────────────────────
 const toastContainer = (() => {
@@ -69,40 +84,108 @@ async function api(method, path, body) {
 function buildFlatModel() {
   allWords = [];
   breakPositions = [];
+
   cues.forEach((cue, i) => {
     const words = cue.text.replace(/\n/g, ' ').trim().split(/\s+/).filter(Boolean);
-    allWords.push(...words);
+    const cueStartMs = timeToMs(cue.startTime);
+    const cueEndMs   = timeToMs(cue.endTime);
+    const cueDur     = cueEndMs - cueStartMs;
+    const totalChars = words.reduce((s, w) => s + w.length, 0) || 1;
+    let charAcc = 0;
+
+    words.forEach(w => {
+      const wStart = cueStartMs + (cueDur * charAcc / totalChars);
+      charAcc += w.length;
+      const wEnd = cueStartMs + (cueDur * charAcc / totalChars);
+      allWords.push({
+        word: w,
+        start: wStart / 1000,
+        end: wEnd / 1000,
+        resolveId: cue.resolveId || null,
+      });
+    });
+
     if (i < cues.length - 1) breakPositions.push(allWords.length);
   });
 }
 
 function flatModelToCues() {
-  // Preserve the overall time span; redistribute proportionally at moved boundaries
-  const origStart = cues.length ? timeToMs(cues[0].startTime) : 0;
-  const origEnd   = cues.length ? timeToMs(cues[cues.length - 1].endTime) : 0;
-  const totalDur  = origEnd - origStart;
-
   const cuts = [0, ...breakPositions, allWords.length];
-  const segments = [];
-  for (let i = 0; i < cuts.length - 1; i++) {
-    segments.push(allWords.slice(cuts[i], cuts[i + 1]).join(' '));
-  }
-  const totalChars = segments.reduce((s, t) => s + t.length, 0) || 1;
-
   const newCues = [];
-  let cumChars = 0;
-  segments.forEach((text, i) => {
-    const sMs = origStart + Math.round(totalDur * cumChars / totalChars);
-    cumChars += text.length;
-    const eMs = origStart + Math.round(totalDur * cumChars / totalChars);
+
+  for (let i = 0; i < cuts.length - 1; i++) {
+    const groupWords = allWords.slice(cuts[i], cuts[i + 1]);
+    if (!groupWords.length) continue;
+
+    const text = groupWords.map(w => w.word).join(' ');
+    const sMs  = Math.round(groupWords[0].start * 1000);
+    const eMs  = Math.round(groupWords[groupWords.length - 1].end * 1000);
+
     newCues.push({
       index: i + 1,
       startTime: msToTime(sMs),
       endTime: msToTime(eMs),
       text,
     });
-  });
+  }
   return newCues;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// LOAD FROM WHISPER TRANSCRIPTION
+// ═══════════════════════════════════════════════════════════════════════
+
+function loadTranscriptionWords(words) {
+  // Set allWords directly from Whisper output
+  allWords = words.map(w => ({
+    word: w.word,
+    start: w.start,
+    end: w.end,
+    resolveId: null,
+  }));
+  wordTimingMode = true;
+
+  // Compute initial break positions based on pauses and max line length
+  breakPositions = computeInitialBreaks(allWords);
+
+  // Build cues from the flat model
+  cues = flatModelToCues();
+  render();
+}
+
+function computeInitialBreaks(words) {
+  if (words.length <= 1) return [];
+
+  const breaks = [];
+  let groupStart = 0;
+  let groupChars = 0;
+
+  for (let i = 0; i < words.length; i++) {
+    groupChars += words[i].word.length + (i > groupStart ? 1 : 0); // +1 for space
+
+    const atEnd = i === words.length - 1;
+    if (atEnd) continue;
+
+    const gap = words[i + 1].start - words[i].end;
+    const isPause = gap >= 0.5;
+    const isTooLong = groupChars > maxChars;
+    const isPunct = /[.!?;]$/.test(words[i].word);
+    const isComma = /,$/.test(words[i].word);
+
+    // Break on: significant pause, line too long, or sentence-ending punctuation
+    if (isPause || isTooLong || (isPunct && groupChars > 15)) {
+      breaks.push(i + 1);
+      groupStart = i + 1;
+      groupChars = 0;
+    } else if (isComma && groupChars > 30) {
+      // Break on comma if line is getting long
+      breaks.push(i + 1);
+      groupStart = i + 1;
+      groupChars = 0;
+    }
+  }
+
+  return breaks;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -110,18 +193,28 @@ function flatModelToCues() {
 // ═══════════════════════════════════════════════════════════════════════
 
 function render() {
-  buildFlatModel();
+  // If we don't have word-level data yet, build from cues
+  if (!allWords.length && cues.length) {
+    buildFlatModel();
+  }
 
   const old = document.getElementById('script-view');
   if (old) old.remove();
 
-  emptyState.style.display = allWords.length ? 'none' : '';
-  cueCountEl.textContent   = cues.length ? `${cues.length} cues` : '';
-  btnSave.disabled         = !cues.length;
-  btnSaveAs.disabled       = !cues.length;
-  btnAutoFormat.disabled   = !cues.length;
-  btnReadResolve.disabled  = !resolveOk;
-  btnPushResolve.disabled  = !resolveOk || !cues.length;
+  emptyState.style.display     = allWords.length ? 'none' : '';
+  cueCountEl.textContent       = cues.length ? `${cues.length} cues` : '';
+  btnSave.disabled             = !cues.length;
+  btnSaveAs.disabled           = !cues.length;
+  btnAutoFormat.disabled       = !cues.length;
+  btnReadResolve.disabled      = !resolveOk;
+  btnPushResolve.disabled      = !cues.length;  // always available when cues exist
+  btnExportWordSrt.disabled    = !allWords.length;
+
+  // Update timing badge
+  if (timingBadge) {
+    timingBadge.textContent = wordTimingMode ? 'Word-timed' : 'SRT-timed';
+    timingBadge.className   = 'timing-badge ' + (wordTimingMode ? 'badge-word' : 'badge-srt');
+  }
 
   if (!allWords.length) return;
 
@@ -131,7 +224,7 @@ function render() {
 
   let breakIdx = 0;
 
-  allWords.forEach((word, idx) => {
+  allWords.forEach((wordObj, idx) => {
     // Insert break marker before this word if it's a break position
     if (breakIdx < breakPositions.length && breakPositions[breakIdx] === idx) {
       view.appendChild(createBreakMarker(breakIdx, idx));
@@ -142,7 +235,7 @@ function render() {
 
     const span = document.createElement('span');
     span.className = 'word';
-    span.textContent = word;
+    span.textContent = wordObj.word;
     span.dataset.idx = idx;
     view.appendChild(span);
   });
@@ -158,10 +251,12 @@ function createBreakMarker(breakIdx, wordIdx) {
   marker.className = 'cue-break';
   marker.dataset.breakIdx = breakIdx;
 
-  // Tooltip label
+  // Tooltip label — show cue number and time from the word at this break
   const label = document.createElement('span');
   label.className = 'break-label';
-  label.textContent = `${breakIdx + 1} | ${shortTime(cues[breakIdx].endTime)}`;
+  const breakWord = allWords[wordIdx];
+  const timeStr = shortTime(msToTime(Math.round(breakWord.start * 1000)));
+  label.textContent = `${breakIdx + 1} | ${timeStr}`;
   marker.appendChild(label);
 
   // Drag
@@ -185,7 +280,6 @@ function createBreakMarker(breakIdx, wordIdx) {
 // ═══════════════════════════════════════════════════════════════════════
 
 function startDrag(breakIdx, sourceEl) {
-  // Constraints: break can't cross adjacent breaks
   const prevBreak = breakIdx > 0 ? breakPositions[breakIdx - 1] : 0;
   const nextBreak = breakIdx < breakPositions.length - 1
     ? breakPositions[breakIdx + 1] : allWords.length;
@@ -193,8 +287,8 @@ function startDrag(breakIdx, sourceEl) {
   dragState = {
     breakIdx,
     sourceEl,
-    min: prevBreak + 1,          // at least 1 word in cue above
-    max: nextBreak,              // break position = first word of cue below; max keeps 1 word below
+    min: prevBreak + 1,
+    max: nextBreak,
     currentTarget: null,
   };
 
@@ -207,18 +301,15 @@ function startDrag(breakIdx, sourceEl) {
 function onDragMove(e) {
   if (!dragState) return;
 
-  // Clear previous indicator
   const prev = document.querySelector('.drop-target-before');
   if (prev) prev.classList.remove('drop-target-before');
 
   const target = findNearestGap(e.clientX, e.clientY);
   if (target === null) return;
 
-  // Clamp to valid range
   const clamped = Math.max(dragState.min, Math.min(dragState.max - 1, target));
   dragState.currentTarget = clamped;
 
-  // Show indicator on the word at position `clamped` (the first word of the "below" cue)
   const wordEl = document.querySelector(`.script-flow .word[data-idx="${clamped}"]`);
   if (wordEl) wordEl.classList.add('drop-target-before');
 }
@@ -230,26 +321,25 @@ function onDragEnd() {
 
   const { breakIdx, sourceEl, currentTarget } = dragState;
 
-  // Clean up
   sourceEl.classList.remove('dragging-source');
   document.body.classList.remove('is-dragging');
   const ind = document.querySelector('.drop-target-before');
   if (ind) ind.classList.remove('drop-target-before');
 
-  // Commit move
   if (currentTarget !== null && currentTarget !== breakPositions[breakIdx]) {
     breakPositions[breakIdx] = currentTarget;
     breakPositions.sort((a, b) => a - b);
     cues = flatModelToCues();
     render();
     setStatus('Break moved.');
+    autoSaveSRT(true);
+    autoLivePush();
   }
 
   dragState = null;
 }
 
 function findNearestGap(cx, cy) {
-  // Find the word whose left edge is closest to the cursor → break goes before that word
   const wordEls = document.querySelectorAll('.script-flow .word');
   let best = null;
   let bestDist = Infinity;
@@ -257,11 +347,9 @@ function findNearestGap(cx, cy) {
   wordEls.forEach(el => {
     const rect = el.getBoundingClientRect();
     const idx = parseInt(el.dataset.idx);
-
-    // Gap before this word: use left edge center
     const dx = cx - rect.left;
     const dy = cy - (rect.top + rect.height / 2);
-    const dist = Math.abs(dx) + Math.abs(dy) * 0.5; // weight Y less
+    const dist = Math.abs(dx) + Math.abs(dy) * 0.5;
 
     if (dist < bestDist) {
       bestDist = dist;
@@ -281,9 +369,8 @@ function onDoubleClick(e) {
   if (!wordEl) return;
 
   const idx = parseInt(wordEl.dataset.idx);
-  const insertPos = idx + 1; // break after the clicked word
+  const insertPos = idx + 1;
 
-  // Don't insert if there's already a break here, or at the very end
   if (insertPos >= allWords.length) return;
   if (breakPositions.includes(insertPos)) return;
 
@@ -293,6 +380,8 @@ function onDoubleClick(e) {
   render();
   toast('Break added. Double-click the blue line to remove it.', 'success');
   setStatus('Break added.');
+  autoSaveSRT(true);
+  autoLivePush();
 }
 
 function removeBreak(breakIdx) {
@@ -302,15 +391,37 @@ function removeBreak(breakIdx) {
   render();
   toast('Break removed (cues merged).', 'success');
   setStatus('Cues merged.');
+  autoSaveSRT(true);
+  autoLivePush();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// LIVE RESOLVE PUSH (word-level grouping)
+// ═══════════════════════════════════════════════════════════════════════
+
+async function autoLivePush() {
+  if (!resolveOk) return;
+  if (!allWords.some(w => w.resolveId)) return;
+
+  try {
+    const res = await api('POST', '/api/resolve/push-word-groups', {
+      words: allWords.map(w => ({
+        word: w.word,
+        start: w.start,
+        end: w.end,
+        resolveId: w.resolveId,
+      })),
+      breakPositions,
+    });
+    if (res.success && res.updated > 0) {
+      toast(`Live update: ${res.updated} items.`, 'success', 1500);
+    }
+  } catch (e) { /* silent fail for auto-push */ }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════
-
-function wordsOf(cue) {
-  return cue.text.replace(/\n/g, ' ').trim().split(/\s+/).filter(Boolean);
-}
 
 function shortTime(t) {
   const p = t.split(',')[0].split(':');
@@ -355,7 +466,7 @@ function updateResolvePill(st) {
     if (st.error) resolvePill.title = st.error;
   }
   btnReadResolve.disabled = !resolveOk;
-  btnPushResolve.disabled = !resolveOk || !cues.length;
+  // Don't touch btnPushResolve here — it's always available when cues exist
 }
 async function checkResolveStatus() {
   try { updateResolvePill(await api('GET', '/api/resolve/status')); }
@@ -378,51 +489,58 @@ formatModeSelect.addEventListener('change', () => { autoFormatMode = formatModeS
 // Resolve pill
 resolvePill.addEventListener('click', async () => {
   resolvePill.className = 'pill pill-idle';
-  resolveLabel.textContent = 'Connecting\u2026';
+  resolveLabel.textContent = 'Connecting…';
   const r = await api('POST', '/api/resolve/connect');
   updateResolvePill(r);
   toast(r.connected ? `Connected to Resolve ${r.version}` : (r.error || 'Could not connect.'),
     r.connected ? 'success' : 'error', r.connected ? 3000 : 6000);
 });
 
-// Load SRT
-btnBrowse.addEventListener('click', () => filePicker.click());
-filePicker.addEventListener('change', () => {
-  const file = filePicker.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = async (e) => {
-    setStatus('Parsing\u2026');
-    try {
-      const res = await api('POST', '/api/parse-srt', { content: e.target.result, filename: file.name });
-      if (res.error) { toast(res.error, 'error'); setStatus('Error.'); return; }
-      cues = res.cues;
-      fileName = res.filename;
-      fileNameDisplay.textContent = file.name;
-      fileNameDisplay.classList.add('loaded');
-      render();
-      setStatus(`Loaded ${res.count} cues from ${file.name}`);
-      toast(`Loaded ${res.count} cues.`, 'success');
-    } catch (err) { toast('Failed to parse file.', 'error'); setStatus('Error.'); }
-    filePicker.value = '';
-  };
-  reader.readAsText(file);
+// Load SRT file via native dialog (gets full path for auto-save)
+btnBrowse.addEventListener('click', async () => {
+  try {
+    const browse = await api('POST', '/api/browse-file', { mode: 'srt' });
+    if (!browse.path) return;  // user cancelled
+
+    setStatus('Loading…');
+    const res = await api('POST', '/api/load-srt', { filePath: browse.path });
+    if (res.error) { toast(res.error, 'error'); setStatus('Error.'); return; }
+
+    cues = res.cues;
+    fileName = browse.path.split(/[/\\]/).pop();
+    // Set sourceFilePath to the folder of the SRT, pointing at the video
+    // (strip _vN suffix if present, then look for common video extensions)
+    sourceFilePath = browse.path.replace(/(_v\d+)?\.srt$/i, '');
+    // If the base file doesn't exist with a known extension, just use the SRT path
+    // so auto-save overwrites the SRT itself
+    sourceFilePath = browse.path.replace(/\.srt$/i, '');
+
+    fileNameDisplay.textContent = fileName;
+    fileNameDisplay.classList.add('loaded');
+    wordTimingMode = false;
+    allWords = [];
+    srtVersion = 0;
+    render();
+    setStatus(`Loaded ${res.count} cues from ${fileName}`);
+    toast(`Loaded ${res.count} cues. Auto-save active.`, 'success');
+  } catch (err) { toast('Failed to load file.', 'error'); setStatus('Error.'); }
 });
 
 // Auto-format
 btnAutoFormat.addEventListener('click', async () => {
-  setStatus('Formatting\u2026');
+  setStatus('Formatting…');
   try {
     const res = await api('POST', '/api/format', { cues, maxChars, mode: autoFormatMode });
     if (res.error) { toast(res.error, 'error'); return; }
     cues = res.cues;
+    allWords = [];  // rebuild
     render();
     toast('Auto-format applied.', 'success');
     setStatus('Formatted.');
   } catch (e) { toast('Formatting failed.', 'error'); }
 });
 
-// Download SRT
+// Download SRT (clean, grouped)
 btnSave.addEventListener('click', () => {
   const blob = new Blob([serializeSRT(cues)], { type: 'text/plain;charset=utf-8' });
   const url = URL.createObjectURL(blob);
@@ -432,6 +550,27 @@ btnSave.addEventListener('click', () => {
   URL.revokeObjectURL(url);
   toast('SRT downloaded.', 'success');
   setStatus(`Downloaded ${fileName}`);
+});
+
+// Export word-level SRT (for Resolve live mode import)
+btnExportWordSrt.addEventListener('click', async () => {
+  if (!allWords.length) { toast('No words to export.', 'warn'); return; }
+  setStatus('Generating word-level SRT…');
+  try {
+    const res = await api('POST', '/api/export-word-srt', {
+      words: allWords.map(w => ({ word: w.word, start: w.start, end: w.end })),
+    });
+    if (res.error) { toast(res.error, 'error'); return; }
+    const blob = new Blob([res.srt], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const wordFileName = fileName.replace(/\.srt$/i, '') + '_words.srt';
+    a.href = url; a.download = wordFileName;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast('Word-level SRT downloaded. Import this into Resolve for live mode.', 'success', 5000);
+    setStatus(`Exported ${wordFileName}`);
+  } catch (e) { toast('Export failed.', 'error'); }
 });
 
 // Save to path
@@ -462,29 +601,209 @@ saveAsInput.addEventListener('keydown', (e) => {
 
 // Read from Resolve
 btnReadResolve.addEventListener('click', async () => {
-  setStatus('Reading from DaVinci Resolve\u2026');
+  setStatus('Reading from DaVinci Resolve…');
   try {
     const res = await api('GET', '/api/resolve/read');
-    if (res.error) { toast(res.error, 'error'); setStatus('Error.'); return; }
-    cues = res.cues.map((c, i) => ({ ...c, index: i + 1 }));
-    render();
-    toast(`Read ${cues.length} cues from Resolve.`, 'success');
-    setStatus(`Loaded ${cues.length} cues from DaVinci Resolve.`);
+    if (res.error) {
+      toast(res.error, 'error');
+      setStatus('Error.');
+      return;  // Don't wipe editor state on error
+    }
+
+    const readCues = res.cues.map((c, i) => ({ ...c, index: i + 1 }));
+
+    if (!readCues.length) {
+      toast('No subtitle items found in Resolve.', 'warn');
+      setStatus('No items in Resolve.');
+      return;  // Don't wipe editor state on empty result
+    }
+
+    // Detect word-level track: most cues are single words
+    const singleWordCues = readCues.filter(c => c.text.trim().split(/\s+/).length === 1);
+    const isWordLevel = readCues.length > 10 && singleWordCues.length / readCues.length > 0.8;
+
+    if (isWordLevel) {
+      // Word-level track — build allWords directly with resolveIds, then smart-group
+      allWords = readCues.map(c => ({
+        word: c.text.trim(),
+        start: timeToMs(c.startTime) / 1000,
+        end: timeToMs(c.endTime) / 1000,
+        resolveId: c.resolveId || null,
+      }));
+      wordTimingMode = true;
+      breakPositions = computeInitialBreaks(allWords);
+      cues = flatModelToCues();
+      render();
+      toast(`Read ${allWords.length} words from Resolve (word-level track, track ${res.trackUsed}). Smart breaks applied.`, 'success', 5000);
+      setStatus(`Loaded ${allWords.length} words from Resolve — ${cues.length} cues.`);
+    } else {
+      // Normal subtitle track — load as cues
+      cues = readCues;
+      allWords = [];
+      wordTimingMode = false;
+      render();
+      toast(`Read ${cues.length} cues from Resolve (track ${res.trackUsed}).`, 'success');
+      setStatus(`Loaded ${cues.length} cues from DaVinci Resolve.`);
+    }
   } catch (e) { toast('Could not read from Resolve.', 'error'); }
 });
 
-// Push to Resolve
+// Save new version — creates a versioned SRT for clean Resolve import
 btnPushResolve.addEventListener('click', async () => {
-  const withIds = cues.filter(c => c.resolveId);
-  if (!withIds.length) {
-    toast('No Resolve IDs \u2014 use "Read from Resolve" first.', 'warn', 5000);
+  if (!cues.length) return;
+
+  if (sourceFilePath) {
+    srtVersion++;
+    const baseName = sourceFilePath.replace(/\.[^.]+$/, '');
+    const versionedPath = `${baseName}_v${srtVersion}.srt`;
+    try {
+      const res = await api('POST', '/api/save-srt', { filePath: versionedPath, cues });
+      if (res.error) { toast(res.error, 'error'); srtVersion--; return; }
+      toast(`Saved ${versionedPath} — drag into Resolve.`, 'success', 5000);
+      setStatus(`Saved → ${versionedPath}`);
+    } catch (e) { toast('Save failed.', 'error'); srtVersion--; }
+  } else {
+    // No source path — trigger versioned download
+    srtVersion++;
+    const dlName = fileName.replace(/\.srt$/i, '') + `_v${srtVersion}.srt`;
+    const blob = new Blob([serializeSRT(cues)], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = dlName;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast(`Downloaded ${dlName} — drag into Resolve.`, 'success', 5000);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// TRANSCRIPTION
+// ═══════════════════════════════════════════════════════════════════════
+
+// Browse for media file (opens native Windows file dialog)
+btnBrowseMedia.addEventListener('click', async () => {
+  btnBrowseMedia.disabled = true;
+  try {
+    const res = await api('POST', '/api/browse-file', { mode: 'media' });
+    if (res.path) {
+      transcribePath.value = res.path;
+      transcribePath.focus();
+    }
+  } catch (e) { toast('Could not open file dialog.', 'error'); }
+  btnBrowseMedia.disabled = false;
+});
+
+btnTranscribe.addEventListener('click', async () => {
+  const filePath = transcribePath.value.trim();
+  if (!filePath) {
+    toast('Enter a file path to transcribe.', 'warn');
+    transcribePath.focus();
     return;
   }
-  setStatus('Pushing to DaVinci Resolve\u2026');
+
+  btnTranscribe.disabled = true;
+  btnTranscribe.textContent = 'Starting…';
+  setStatus('Starting transcription…');
+
   try {
-    const res = await api('POST', '/api/resolve/push-all', { cues });
-    if (res.error) { toast(res.error, 'error'); return; }
-    toast(`Updated ${res.updated} cue(s) in Resolve.`, 'success');
-    setStatus(`Pushed ${res.updated} cues to DaVinci Resolve.`);
-  } catch (e) { toast('Push to Resolve failed.', 'error'); }
+    const res = await api('POST', '/api/transcribe', { filePath });
+    if (res.error) {
+      toast(res.error, 'error', 5000);
+      setStatus('Transcription failed to start.');
+      btnTranscribe.disabled = false;
+      btnTranscribe.textContent = 'Transcribe';
+      return;
+    }
+
+    transcribeJobId = res.jobId;
+    sourceFilePath = filePath;  // remember source for auto-save
+    transcribeBar.classList.remove('hidden');
+    transcribeFill.style.width = '0%';
+    btnTranscribe.textContent = 'Transcribing…';
+    setStatus('Transcribing…');
+
+    // Start polling
+    transcribePollTimer = setInterval(pollTranscription, 1500);
+
+  } catch (e) {
+    toast('Could not start transcription.', 'error');
+    btnTranscribe.disabled = false;
+    btnTranscribe.textContent = 'Transcribe';
+  }
 });
+
+async function pollTranscription() {
+  if (!transcribeJobId) return;
+
+  try {
+    const job = await api('GET', `/api/transcribe/status?jobId=${transcribeJobId}`);
+
+    if (job.error && !job.status) {
+      // Job not found
+      stopTranscriptionPolling();
+      toast(job.error, 'error');
+      return;
+    }
+
+    // Update progress bar
+    const pct = Math.round((job.progress || 0) * 100);
+    transcribeFill.style.width = pct + '%';
+    setStatus(`Transcribing… ${pct}%`);
+
+    if (job.status === 'complete') {
+      stopTranscriptionPolling();
+
+      if (job.words && job.words.length) {
+        loadTranscriptionWords(job.words);
+        fileName = (job.file || 'transcription').replace(/\.[^.]+$/, '') + '.srt';
+        fileNameDisplay.textContent = job.file || 'Transcription';
+        fileNameDisplay.classList.add('loaded');
+        toast(`Transcribed ${job.words.length} words.`, 'success');
+        setStatus(`Transcription complete — ${job.words.length} words, ${cues.length} cues.`);
+
+        // Auto-save SRT next to source file if we have the path
+        if (sourceFilePath) {
+          autoSaveSRT();
+        }
+      } else {
+        toast('Transcription produced no words.', 'warn');
+        setStatus('Transcription complete but no words detected.');
+      }
+    }
+
+    if (job.status === 'error') {
+      stopTranscriptionPolling();
+      toast(`Transcription error: ${job.error}`, 'error', 8000);
+      setStatus('Transcription failed.');
+    }
+
+  } catch (e) {
+    // Network error — keep polling
+  }
+}
+
+async function autoSaveSRT(quiet = false) {
+  if (!cues.length || !sourceFilePath) return;
+  // Save SRT next to the source file (replace extension with .srt)
+  const srtPath = sourceFilePath.replace(/\.[^.]+$/, '') + '.srt';
+  try {
+    const res = await api('POST', '/api/save-srt', { filePath: srtPath, cues });
+    if (res.error) {
+      if (!quiet) toast(`Auto-save failed: ${res.error}`, 'warn');
+    } else {
+      if (!quiet) toast(`SRT saved.`, 'success', 1500);
+      setStatus(`Saved → ${srtPath}`);
+    }
+  } catch (e) { /* silent */ }
+}
+
+function stopTranscriptionPolling() {
+  if (transcribePollTimer) {
+    clearInterval(transcribePollTimer);
+    transcribePollTimer = null;
+  }
+  transcribeJobId = null;
+  transcribeBar.classList.add('hidden');
+  btnTranscribe.disabled = false;
+  btnTranscribe.textContent = 'Transcribe';
+}

@@ -117,8 +117,13 @@ def _ms_to_time(ms: int) -> str:
     return f'{h:02d}:{m:02d}:{s:02d},{ms:03d}'
 
 
-def read_subtitle_track() -> dict:
-    """Return all cues from the first subtitle track of the current timeline."""
+def read_subtitle_track(track_index: int = 0) -> dict:
+    """
+    Return all cues from a subtitle track of the current timeline.
+
+    track_index=0 means auto-detect: try each track and use the first
+    one that has items. Otherwise use the specified 1-based index.
+    """
     _, timeline = _get_timeline()
     if timeline is None:
         return {'error': 'Not connected or no active timeline.'}
@@ -130,7 +135,25 @@ def read_subtitle_track() -> dict:
 
         fps = _fps(timeline)
         start_frame = timeline.GetStartFrame()
-        items = timeline.GetItemListInTrack('subtitle', 1)
+
+        # Determine which track to read
+        if track_index > 0:
+            tracks_to_try = [track_index]
+        else:
+            # Auto: try all tracks, pick the first with items
+            tracks_to_try = list(range(1, track_count + 1))
+
+        items = None
+        used_track = None
+        for tidx in tracks_to_try:
+            candidate = timeline.GetItemListInTrack('subtitle', tidx)
+            if candidate and len(candidate) > 0:
+                items = candidate
+                used_track = tidx
+                break
+
+        if not items:
+            return {'error': f'No subtitle items found in any of the {track_count} subtitle track(s).'}
 
         cues = []
         for item in items:
@@ -145,7 +168,7 @@ def read_subtitle_track() -> dict:
                 'resolveId': item.GetUniqueId(),
             })
 
-        return {'cues': cues, 'fps': fps, 'trackCount': track_count}
+        return {'cues': cues, 'fps': fps, 'trackCount': track_count, 'trackUsed': used_track}
 
     except Exception as e:
         return {'error': str(e)}
@@ -172,6 +195,84 @@ def update_cue_text(resolve_id: str, new_text: str) -> dict:
         return {'success': False, 'error': str(e)}
 
 
+def reimport_srt(srt_path: str, track_index: int = 1) -> dict:
+    """
+    Attempt to reimport an SRT file into the current timeline.
+
+    Tries multiple Resolve API methods since different versions
+    support different approaches. Returns success/failure with details.
+    """
+    if not os.path.isfile(srt_path):
+        return {'success': False, 'error': f'File not found: {srt_path}'}
+
+    _, timeline = _get_timeline()
+    if timeline is None:
+        return {'success': False, 'error': 'Not connected or no active timeline.'}
+
+    # Try method 1: timeline.ImportIntoTimeline (Resolve 18+)
+    try:
+        result = timeline.ImportIntoTimeline(srt_path)
+        if result:
+            return {'success': True, 'method': 'ImportIntoTimeline'}
+    except Exception:
+        pass
+
+    # Try method 2: Import via media pool then append
+    try:
+        project = _resolve.GetProjectManager().GetCurrentProject()
+        media_pool = project.GetMediaPool()
+        clips = media_pool.ImportMedia([srt_path])
+        if clips and len(clips) > 0:
+            appended = media_pool.AppendToTimeline(clips)
+            if appended:
+                return {'success': True, 'method': 'MediaPool.ImportMedia+Append'}
+    except Exception:
+        pass
+
+    return {
+        'success': False,
+        'error': 'Could not reimport SRT automatically. Please reimport manually in Resolve: '
+                 'right-click the subtitle track → Import Subtitle, or File → Import → Subtitle.',
+        'srtPath': srt_path,
+    }
+
+
+def _all_subtitle_items(timeline) -> dict:
+    """Build a resolveId → item map across ALL subtitle tracks."""
+    id_to_item = {}
+    track_count = timeline.GetTrackCount('subtitle')
+    for tidx in range(1, track_count + 1):
+        items = timeline.GetItemListInTrack('subtitle', tidx)
+        if items:
+            for item in items:
+                id_to_item[item.GetUniqueId()] = item
+    return id_to_item
+
+
+def batch_set_names(updates: list) -> dict:
+    """
+    Set text on multiple subtitle items by resolveId.
+
+    `updates` is a list of (resolveId, text) tuples.
+    Multiple items may receive the same text (word-level grouping).
+    Searches ALL subtitle tracks for matching IDs.
+    """
+    _, timeline = _get_timeline()
+    if timeline is None:
+        return {'success': False, 'error': 'Not connected or no active timeline.'}
+
+    try:
+        id_to_item = _all_subtitle_items(timeline)
+        updated = 0
+        for rid, text in updates:
+            if rid in id_to_item:
+                id_to_item[rid].SetName(text)
+                updated += 1
+        return {'success': True, 'updated': updated}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
 def update_all_texts(cues: list) -> dict:
     """
     Batch-update the text of multiple cues.
@@ -184,8 +285,7 @@ def update_all_texts(cues: list) -> dict:
         return {'success': False, 'error': 'Not connected.'}
 
     try:
-        items = timeline.GetItemListInTrack('subtitle', 1)
-        id_to_item = {item.GetUniqueId(): item for item in items}
+        id_to_item = _all_subtitle_items(timeline)
         updated = 0
         for cue in cues:
             rid = cue.get('resolveId')
