@@ -11,12 +11,13 @@ from srt_parser import (
     SubtitleCue,
     format_cues_split,
     format_cues_two_line,
-    generate_word_srt,
     parse_srt,
     serialize_srt,
 )
 
 app = Flask(__name__)
+# Re-read templates from disk on each request (no need to restart Flask after HTML edits)
+app.config['TEMPLATES_AUTO_RELOAD'] = True
 
 
 # Disable caching for all static/template files during development
@@ -183,50 +184,6 @@ def resolve_read():
     return jsonify(result)
 
 
-@app.route('/api/resolve/reimport-srt', methods=['POST'])
-def resolve_reimport():
-    """Save the current SRT and attempt to reimport it into Resolve."""
-    data = request.get_json()
-    srt_path = (data or {}).get('srtPath', '').strip()
-    cues_data = (data or {}).get('cues', [])
-
-    if not srt_path:
-        return jsonify({'error': 'No SRT path provided.'}), 400
-
-    # Save the SRT first
-    cues = _cues_from_list(cues_data)
-    content = serialize_srt(cues)
-    try:
-        with open(srt_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-    except Exception as e:
-        return jsonify({'error': f'Could not save SRT: {e}'}), 500
-
-    # Try to reimport into Resolve
-    result = resolve_bridge.reimport_srt(srt_path)
-    result['srtPath'] = srt_path
-    result['saved'] = True
-    return jsonify(result)
-
-
-@app.route('/api/resolve/update-cue', methods=['POST'])
-def resolve_update_cue():
-    data = request.get_json()
-    resolve_id = (data or {}).get('resolveId')
-    text = (data or {}).get('text', '')
-    if not resolve_id:
-        return jsonify({'success': False, 'error': 'No resolveId provided.'}), 400
-    return jsonify(resolve_bridge.update_cue_text(resolve_id, text))
-
-
-@app.route('/api/resolve/push-all', methods=['POST'])
-def resolve_push_all():
-    """Push text of all cues that have a resolveId back to Resolve."""
-    data = request.get_json()
-    cues = (data or {}).get('cues', [])
-    return jsonify(resolve_bridge.update_all_texts(cues))
-
-
 # ---------------------------------------------------------------------------
 # Whisper transcription
 # ---------------------------------------------------------------------------
@@ -293,56 +250,6 @@ def transcribe_status():
         return jsonify({'error': 'Job not found.'}), 404
 
     return jsonify(job)
-
-
-@app.route('/api/export-word-srt', methods=['POST'])
-def export_word_srt():
-    """Generate a word-level SRT (one cue per word, contiguous timing)."""
-    data = request.get_json()
-    words = (data or {}).get('words', [])
-
-    if not words:
-        return jsonify({'error': 'No words provided.'}), 400
-
-    try:
-        srt_content = generate_word_srt(words)
-        return jsonify({'srt': srt_content})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/resolve/push-word-groups', methods=['POST'])
-def resolve_push_word_groups():
-    """
-    Push word groups to Resolve — each word-item gets its group's combined text.
-    This is the live-update mechanism: all word-items in a group show the same text,
-    so it looks like one continuous subtitle spanning the full group duration.
-    """
-    data = request.get_json()
-    words = (data or {}).get('words', [])
-    breaks = (data or {}).get('breakPositions', [])
-
-    if not words:
-        return jsonify({'error': 'No words provided.'}), 400
-
-    # Build groups from break positions
-    cuts = [0] + sorted(breaks) + [len(words)]
-    updates = []  # list of (resolveId, text)
-
-    for i in range(len(cuts) - 1):
-        group_words = words[cuts[i]:cuts[i + 1]]
-        combined_text = ' '.join(w['word'] for w in group_words)
-
-        for w in group_words:
-            rid = w.get('resolveId')
-            if rid:
-                updates.append((rid, combined_text))
-
-    if not updates:
-        return jsonify({'success': True, 'updated': 0,
-                        'note': 'No words have resolveIds. Read from Resolve first.'})
-
-    return jsonify(resolve_bridge.batch_set_names(updates))
 
 
 # ---------------------------------------------------------------------------

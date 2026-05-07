@@ -171,45 +171,6 @@ def format_cues_two_line(cues: List[SubtitleCue], max_chars: int) -> List[Subtit
     return result
 
 
-def seconds_to_srt_time(sec: float) -> str:
-    """Convert seconds (float) to SRT time format 'HH:MM:SS,mmm'."""
-    total_ms = max(0, round(sec * 1000))
-    return ms_to_time(total_ms)
-
-
-def generate_word_srt(words: list) -> str:
-    """
-    Generate an SRT where each cue is a single word with contiguous timing.
-
-    Each word's end time is set to the next word's start time (no gaps),
-    so DaVinci Resolve creates a continuous sequence of subtitle items.
-
-    `words` is a list of {"word": str, "start": float, "end": float}.
-    """
-    if not words:
-        return ''
-
-    cues = []
-    for i, w in enumerate(words):
-        start_sec = w['start']
-        # Contiguous: this word's end = next word's start (no gaps)
-        if i < len(words) - 1:
-            end_sec = words[i + 1]['start']
-            # But don't let end < start (shouldn't happen, but be safe)
-            if end_sec <= start_sec:
-                end_sec = w['end']
-        else:
-            end_sec = w['end']
-
-        cues.append(SubtitleCue(
-            index=i + 1,
-            start_time=seconds_to_srt_time(start_sec),
-            end_time=seconds_to_srt_time(end_sec),
-            text=w['word'],
-        ))
-    return serialize_srt(cues)
-
-
 def format_cues_split(cues: List[SubtitleCue], max_chars: int) -> List[SubtitleCue]:
     """
     Split cues that exceed max_chars into multiple single-line cues,

@@ -10,10 +10,12 @@ let resolveOk      = false;
 let maxChars       = 42;
 let autoFormatMode = 'two_line';
 
+// Hold a cue through silences up to this many seconds before letting it cut out
+let pauseTolerance = parseFloat(localStorage.getItem('pauseTolerance')) || 2.0;
+
 // Flat model — each word is {word, start, end, resolveId}
 let allWords       = [];      // [{word:"hello", start:0.0, end:0.4, resolveId:null}, …]
 let breakPositions = [];      // sorted indices into allWords where a new cue starts
-let wordTimingMode = false;   // true when allWords have real Whisper timestamps
 
 // Drag
 let dragState      = null;    // { breakIdx, sourceEl, min, max, currentTarget }
@@ -26,14 +28,20 @@ let srtVersion     = 0;     // incremented each time user clicks "Save new versi
 
 // ── DOM refs ───────────────────────────────────────────────────────────
 const btnBrowse        = document.getElementById('btn-browse');
+const btnBrowseEmpty   = document.getElementById('btn-browse-empty');
 const fileNameDisplay  = document.getElementById('file-name-display');
 const btnSave          = document.getElementById('btn-save');
 const btnSaveAs        = document.getElementById('btn-save-as');
+const btnAutoFormatToggle = document.getElementById('btn-auto-format-toggle');
 const btnAutoFormat    = document.getElementById('btn-auto-format');
+const formatPopover    = document.getElementById('format-popover');
+const btnOverflow      = document.getElementById('btn-overflow');
+const overflowMenu     = document.getElementById('overflow-menu');
 const btnReadResolve   = document.getElementById('btn-read-resolve');
 const btnPushResolve   = document.getElementById('btn-push-resolve');
 const maxCharsInput    = document.getElementById('max-chars');
 const formatModeSelect = document.getElementById('format-mode');
+const pauseToleranceInput = document.getElementById('pause-tolerance');
 const resolvePill      = document.getElementById('resolve-pill');
 const resolveLabel     = document.getElementById('resolve-label');
 const container        = document.getElementById('cue-list-container');
@@ -51,8 +59,6 @@ const btnBrowseMedia   = document.getElementById('btn-browse-media');
 const btnTranscribe    = document.getElementById('btn-transcribe');
 const transcribeBar    = document.getElementById('transcribe-progress');
 const transcribeFill   = document.getElementById('transcribe-progress-fill');
-const btnExportWordSrt = document.getElementById('btn-export-word-srt');
-const timingBadge      = document.getElementById('timing-badge');
 
 // ── Toast ──────────────────────────────────────────────────────────────
 const toastContainer = (() => {
@@ -111,24 +117,34 @@ function buildFlatModel() {
 
 function flatModelToCues() {
   const cuts = [0, ...breakPositions, allWords.length];
-  const newCues = [];
-
+  const groups = [];
   for (let i = 0; i < cuts.length - 1; i++) {
-    const groupWords = allWords.slice(cuts[i], cuts[i + 1]);
-    if (!groupWords.length) continue;
-
-    const text = groupWords.map(w => w.word).join(' ');
-    const sMs  = Math.round(groupWords[0].start * 1000);
-    const eMs  = Math.round(groupWords[groupWords.length - 1].end * 1000);
-
-    newCues.push({
-      index: i + 1,
-      startTime: msToTime(sMs),
-      endTime: msToTime(eMs),
-      text,
-    });
+    const g = allWords.slice(cuts[i], cuts[i + 1]);
+    if (g.length) groups.push(g);
   }
-  return newCues;
+
+  return groups.map((groupWords, i) => {
+    const text   = groupWords.map(w => w.word).join(' ');
+    const sStart = groupWords[0].start;
+    let   sEnd   = groupWords[groupWords.length - 1].end;
+
+    // Hold the caption through small pauses up to `pauseTolerance` seconds —
+    // extend end time to next group's start when the gap is short enough,
+    // so the caption doesn't briefly disappear between sentences.
+    const next = groups[i + 1];
+    if (next) {
+      const nextStart = next[0].start;
+      const gap = nextStart - sEnd;
+      if (gap > 0 && gap <= pauseTolerance) sEnd = nextStart;
+    }
+
+    return {
+      index: i + 1,
+      startTime: msToTime(Math.round(sStart * 1000)),
+      endTime:   msToTime(Math.round(sEnd   * 1000)),
+      text,
+    };
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -143,7 +159,6 @@ function loadTranscriptionWords(words) {
     end: w.end,
     resolveId: null,
   }));
-  wordTimingMode = true;
 
   // Compute initial break positions based on pauses and max line length
   breakPositions = computeInitialBreaks(allWords);
@@ -201,26 +216,24 @@ function render() {
   const old = document.getElementById('script-view');
   if (old) old.remove();
 
-  emptyState.style.display     = allWords.length ? 'none' : '';
+  // Toggle loaded/empty UI based on whether we have content
+  document.body.classList.toggle('app-loaded', !!allWords.length);
+
   cueCountEl.textContent       = cues.length ? `${cues.length} cues` : '';
   btnSave.disabled             = !cues.length;
   btnSaveAs.disabled           = !cues.length;
+  btnAutoFormatToggle.disabled = !cues.length;
   btnAutoFormat.disabled       = !cues.length;
   btnReadResolve.disabled      = !resolveOk;
-  btnPushResolve.disabled      = !cues.length;  // always available when cues exist
-  btnExportWordSrt.disabled    = !allWords.length;
-
-  // Update timing badge
-  if (timingBadge) {
-    timingBadge.textContent = wordTimingMode ? 'Word-timed' : 'SRT-timed';
-    timingBadge.className   = 'timing-badge ' + (wordTimingMode ? 'badge-word' : 'badge-srt');
-  }
+  btnPushResolve.disabled      = !cues.length;
 
   if (!allWords.length) return;
 
   const view = document.createElement('div');
   view.id = 'script-view';
   view.className = 'script-flow';
+  view.contentEditable = 'true';
+  view.spellcheck = false;
 
   let breakIdx = 0;
 
@@ -240,8 +253,13 @@ function render() {
     view.appendChild(span);
   });
 
-  // Double-click on a word → insert a break after it
-  view.addEventListener('dblclick', onDoubleClick);
+  // Live editing — reconcile model from DOM after typing settles
+  view.addEventListener('input', onContentEdit);
+  view.addEventListener('keydown', onContentKeyDown);
+  view.addEventListener('blur', () => {
+    if (reconcileTimer) clearTimeout(reconcileTimer);
+    reconcileFromDOM();
+  });
 
   container.appendChild(view);
 }
@@ -250,6 +268,7 @@ function createBreakMarker(breakIdx, wordIdx) {
   const marker = document.createElement('span');
   marker.className = 'cue-break';
   marker.dataset.breakIdx = breakIdx;
+  marker.contentEditable = 'false';
 
   // Tooltip label — show cue number and time from the word at this break
   const label = document.createElement('span');
@@ -280,6 +299,11 @@ function createBreakMarker(breakIdx, wordIdx) {
 // ═══════════════════════════════════════════════════════════════════════
 
 function startDrag(breakIdx, sourceEl) {
+  // Flush any pending text-edit reconcile so word data-idx values are current
+  if (reconcileTimer) {
+    clearTimeout(reconcileTimer);
+    reconcileFromDOM();
+  }
   const prevBreak = breakIdx > 0 ? breakPositions[breakIdx - 1] : 0;
   const nextBreak = breakIdx < breakPositions.length - 1
     ? breakPositions[breakIdx + 1] : allWords.length;
@@ -333,7 +357,6 @@ function onDragEnd() {
     render();
     setStatus('Break moved.');
     autoSaveSRT(true);
-    autoLivePush();
   }
 
   dragState = null;
@@ -361,28 +384,316 @@ function findNearestGap(cx, cy) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// ADD / REMOVE BREAKS
+// INLINE TEXT EDITING — contenteditable, debounced reconcile, LCS diff
 // ═══════════════════════════════════════════════════════════════════════
 
-function onDoubleClick(e) {
-  const wordEl = e.target.closest('.word');
-  if (!wordEl) return;
+let reconcileTimer = null;
+const RECONCILE_DELAY_MS = 350;
 
-  const idx = parseInt(wordEl.dataset.idx);
-  const insertPos = idx + 1;
+function onContentEdit() {
+  if (reconcileTimer) clearTimeout(reconcileTimer);
+  reconcileTimer = setTimeout(reconcileFromDOM, RECONCILE_DELAY_MS);
+}
 
-  if (insertPos >= allWords.length) return;
-  if (breakPositions.includes(insertPos)) return;
+function onContentKeyDown(e) {
+  if (e.key === 'Enter') {
+    // Enter inserts a break at the caret position
+    e.preventDefault();
+    insertBreakAtCaret();
+  }
+}
 
-  breakPositions.push(insertPos);
-  breakPositions.sort((a, b) => a - b);
+function createBreakMarkerStub() {
+  // Used when inserting a break mid-edit; reconcile re-renders with full handlers
+  const marker = document.createElement('span');
+  marker.className = 'cue-break';
+  marker.contentEditable = 'false';
+  const label = document.createElement('span');
+  label.className = 'break-label';
+  marker.appendChild(label);
+  return marker;
+}
+
+function insertBreakAtCaret() {
+  const view = document.getElementById('script-view');
+  if (!view) return;
+  const sel = window.getSelection();
+  if (!sel.rangeCount) return;
+  const range = sel.getRangeAt(0);
+  if (!view.contains(range.startContainer)) return;
+
+  const marker = createBreakMarkerStub();
+  range.deleteContents();
+  range.insertNode(marker);
+  // Place caret immediately after the marker
+  range.setStartAfter(marker);
+  range.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(range);
+
+  if (reconcileTimer) clearTimeout(reconcileTimer);
+  reconcileFromDOM();
+}
+
+// ── DOM → tokens + break positions ──────────────────────────────────────
+function tokenizeFromDOM(rootEl) {
+  const tokens = [];
+  const breaks = [];
+  let buffer = '';
+
+  function flush() {
+    const parts = buffer.split(/\s+/).filter(Boolean);
+    tokens.push(...parts);
+    buffer = '';
+  }
+
+  function walk(node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      buffer += node.nodeValue;
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      if (node.classList && node.classList.contains('cue-break')) {
+        flush();
+        breaks.push(tokens.length);
+      } else {
+        for (const child of node.childNodes) walk(child);
+      }
+    }
+  }
+  walk(rootEl);
+  flush();
+  return { tokens, breaks };
+}
+
+// ── Caret offset in plain-text equivalent (skipping break markers) ──────
+function isInBreak(node, root) {
+  let cur = node;
+  while (cur && cur !== root) {
+    if (cur.classList && cur.classList.contains('cue-break')) return true;
+    cur = cur.parentNode;
+  }
+  return false;
+}
+
+function saveCaret(rootEl) {
+  const sel = window.getSelection();
+  if (!sel.rangeCount) return null;
+  const range = sel.getRangeAt(0);
+  if (!rootEl.contains(range.startContainer)) return null;
+
+  let offset = 0;
+  let found = false;
+
+  function walk(node) {
+    if (found) return;
+    if (node === range.startContainer) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        if (!isInBreak(node, rootEl)) offset += range.startOffset;
+      } else {
+        for (let i = 0; i < range.startOffset && i < node.childNodes.length; i++) {
+          walk(node.childNodes[i]);
+        }
+      }
+      found = true;
+      return;
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (!isInBreak(node, rootEl)) offset += node.nodeValue.length;
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      if (node.classList && node.classList.contains('cue-break')) return;
+      for (const child of node.childNodes) {
+        walk(child);
+        if (found) return;
+      }
+    }
+  }
+  walk(rootEl);
+  return found ? offset : null;
+}
+
+function restoreCaret(rootEl, offset) {
+  if (offset == null || !rootEl) return;
+  let remaining = offset;
+  let placed = false;
+
+  function walk(node) {
+    if (placed) return;
+    if (node.nodeType === Node.TEXT_NODE) {
+      const len = node.nodeValue.length;
+      if (remaining <= len) {
+        const range = document.createRange();
+        range.setStart(node, remaining);
+        range.collapse(true);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        placed = true;
+      } else {
+        remaining -= len;
+      }
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      if (node.classList && node.classList.contains('cue-break')) return;
+      for (const child of node.childNodes) {
+        walk(child);
+        if (placed) return;
+      }
+    }
+  }
+  walk(rootEl);
+
+  if (!placed) {
+    rootEl.focus();
+    const range = document.createRange();
+    range.selectNodeContents(rootEl);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+}
+
+// ── LCS diff between old word strings and new tokens ────────────────────
+function lcsDiff(oldArr, newArr) {
+  const m = oldArr.length, n = newArr.length;
+  const dp = [];
+  for (let i = 0; i <= m; i++) dp.push(new Int32Array(n + 1));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      dp[i][j] = oldArr[i] === newArr[j]
+        ? dp[i + 1][j + 1] + 1
+        : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const ops = [];
+  let i = 0, j = 0;
+  while (i < m && j < n) {
+    if (oldArr[i] === newArr[j]) {
+      ops.push({ type: 'keep', oldIdx: i, newIdx: j });
+      i++; j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push({ type: 'delete', oldIdx: i });
+      i++;
+    } else {
+      ops.push({ type: 'insert', newIdx: j });
+      j++;
+    }
+  }
+  while (i < m) ops.push({ type: 'delete', oldIdx: i++ });
+  while (j < n) ops.push({ type: 'insert', newIdx: j++ });
+  return ops;
+}
+
+// Rebuild allWords from old words + new tokens, preserving timing/resolveId
+// for kept words, carrying it across in-place replacements (typo fixes),
+// and interpolating timing for inserts.
+function reconcileWords(oldWords, newTokens) {
+  const oldStrings = oldWords.map(w => w.word);
+  const ops = lcsDiff(oldStrings, newTokens);
+
+  // Coalesce adjacent delete+insert (or insert+delete) into in-place 'replace'
+  for (let k = 0; k < ops.length - 1; k++) {
+    const a = ops[k], b = ops[k + 1];
+    if (a.type === 'delete' && b.type === 'insert') {
+      ops[k] = { type: 'replace', oldIdx: a.oldIdx, newIdx: b.newIdx };
+      ops.splice(k + 1, 1);
+    } else if (a.type === 'insert' && b.type === 'delete') {
+      ops[k] = { type: 'replace', oldIdx: b.oldIdx, newIdx: a.newIdx };
+      ops.splice(k + 1, 1);
+    }
+  }
+
+  const result = [];
+  for (const op of ops) {
+    if (op.type === 'keep') {
+      result.push({ ...oldWords[op.oldIdx] });
+    } else if (op.type === 'replace') {
+      const orig = oldWords[op.oldIdx];
+      result.push({
+        word: newTokens[op.newIdx],
+        start: orig.start,
+        end: orig.end,
+        resolveId: orig.resolveId,
+      });
+    } else if (op.type === 'insert') {
+      result.push({
+        word: newTokens[op.newIdx],
+        start: null,
+        end: null,
+        resolveId: null,
+      });
+    }
+    // 'delete' contributes nothing
+  }
+
+  // Interpolate timing for runs of inserted (untimed) words
+  let i = 0;
+  while (i < result.length) {
+    if (result[i].start == null) {
+      let runEnd = i;
+      while (runEnd < result.length && result[runEnd].start == null) runEnd++;
+      let prevEnd = 0;
+      for (let p = i - 1; p >= 0; p--) {
+        if (result[p].end != null) { prevEnd = result[p].end; break; }
+      }
+      let nextStart = null;
+      for (let q = runEnd; q < result.length; q++) {
+        if (result[q].start != null) { nextStart = result[q].start; break; }
+      }
+      const count = runEnd - i;
+      const slot = nextStart != null
+        ? Math.max(0.05, (nextStart - prevEnd) / count)
+        : 0.3;
+      for (let q = i; q < runEnd; q++) {
+        result[q].start = prevEnd + (q - i) * slot;
+        result[q].end = prevEnd + (q - i + 1) * slot;
+      }
+      i = runEnd;
+    } else {
+      i++;
+    }
+  }
+
+  return result;
+}
+
+function reconcileFromDOM() {
+  reconcileTimer = null;
+  const view = document.getElementById('script-view');
+  if (!view) return;
+
+  const caretOffset = saveCaret(view);
+  const { tokens, breaks } = tokenizeFromDOM(view);
+
+  // Detect no-op so we don't churn re-renders on cosmetic DOM changes
+  const oldText = allWords.map(w => w.word).join(' ');
+  const newText = tokens.join(' ');
+  const oldBreaksKey = breakPositions.join(',');
+  const newBreaksKey = breaks.filter(b => b > 0 && b < tokens.length).join(',');
+  if (oldText === newText && oldBreaksKey === newBreaksKey) return;
+
+  if (!tokens.length) {
+    allWords = [];
+    breakPositions = [];
+    cues = [];
+    render();
+    setStatus('All text removed.');
+    autoSaveSRT(true);
+    return;
+  }
+
+  allWords = reconcileWords(allWords, tokens);
+  breakPositions = [...new Set(breaks)]
+    .filter(b => b > 0 && b < allWords.length)
+    .sort((a, b) => a - b);
   cues = flatModelToCues();
   render();
-  toast('Break added. Double-click the blue line to remove it.', 'success');
-  setStatus('Break added.');
+  restoreCaret(document.getElementById('script-view'), caretOffset);
+  setStatus('Edited.');
   autoSaveSRT(true);
-  autoLivePush();
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// REMOVE BREAK
+// ═══════════════════════════════════════════════════════════════════════
 
 function removeBreak(breakIdx) {
   if (breakPositions.length <= 0) return;
@@ -392,31 +703,6 @@ function removeBreak(breakIdx) {
   toast('Break removed (cues merged).', 'success');
   setStatus('Cues merged.');
   autoSaveSRT(true);
-  autoLivePush();
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// LIVE RESOLVE PUSH (word-level grouping)
-// ═══════════════════════════════════════════════════════════════════════
-
-async function autoLivePush() {
-  if (!resolveOk) return;
-  if (!allWords.some(w => w.resolveId)) return;
-
-  try {
-    const res = await api('POST', '/api/resolve/push-word-groups', {
-      words: allWords.map(w => ({
-        word: w.word,
-        start: w.start,
-        end: w.end,
-        resolveId: w.resolveId,
-      })),
-      breakPositions,
-    });
-    if (res.success && res.updated > 0) {
-      toast(`Live update: ${res.updated} items.`, 'success', 1500);
-    }
-  } catch (e) { /* silent fail for auto-push */ }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -466,14 +752,24 @@ function updateResolvePill(st) {
     if (st.error) resolvePill.title = st.error;
   }
   btnReadResolve.disabled = !resolveOk;
+  // Reflect connection state on the landing's "Read from Resolve" affordance
+  const dot = document.querySelector('.resolve-dot');
+  if (dot) dot.dataset.state = resolveOk ? 'ok' : (st.error ? 'error' : 'idle');
+  const readEmpty = document.getElementById('btn-read-empty');
+  if (readEmpty) readEmpty.dataset.resolve = resolveOk ? 'on' : 'off';
   // Don't touch btnPushResolve here — it's always available when cues exist
 }
-async function checkResolveStatus() {
-  try { updateResolvePill(await api('GET', '/api/resolve/status')); }
+
+// Auto-connect on every poll: /api/resolve/connect is idempotent — if Resolve
+// is reachable, this attaches; if not, it returns the same disconnected state
+// /status would have given. This means opening Resolve after the app is already
+// running will pick up the connection within ~5 seconds, no pill click needed.
+async function pollResolve() {
+  try { updateResolvePill(await api('POST', '/api/resolve/connect')); }
   catch (e) { /* ignore */ }
 }
-setInterval(checkResolveStatus, 8000);
-checkResolveStatus();
+setInterval(pollResolve, 5000);
+pollResolve();
 
 // ═══════════════════════════════════════════════════════════════════════
 // EVENT HANDLERS
@@ -486,6 +782,21 @@ maxCharsInput.addEventListener('change', () => {
 });
 formatModeSelect.addEventListener('change', () => { autoFormatMode = formatModeSelect.value; });
 
+// Pause tolerance applies live — rebuild cues with the new value
+if (pauseToleranceInput) {
+  pauseToleranceInput.value = pauseTolerance.toFixed(1);
+  pauseToleranceInput.addEventListener('input', () => {
+    const v = parseFloat(pauseToleranceInput.value);
+    if (Number.isNaN(v)) return;
+    pauseTolerance = Math.max(0, Math.min(10, v));
+    localStorage.setItem('pauseTolerance', String(pauseTolerance));
+    if (allWords.length) {
+      cues = flatModelToCues();
+      autoSaveSRT(true);
+    }
+  });
+}
+
 // Resolve pill
 resolvePill.addEventListener('click', async () => {
   resolvePill.className = 'pill pill-idle';
@@ -497,7 +808,7 @@ resolvePill.addEventListener('click', async () => {
 });
 
 // Load SRT file via native dialog (gets full path for auto-save)
-btnBrowse.addEventListener('click', async () => {
+async function openSrtFromDisk() {
   try {
     const browse = await api('POST', '/api/browse-file', { mode: 'srt' });
     if (!browse.path) return;  // user cancelled
@@ -508,27 +819,25 @@ btnBrowse.addEventListener('click', async () => {
 
     cues = res.cues;
     fileName = browse.path.split(/[/\\]/).pop();
-    // Set sourceFilePath to the folder of the SRT, pointing at the video
-    // (strip _vN suffix if present, then look for common video extensions)
-    sourceFilePath = browse.path.replace(/(_v\d+)?\.srt$/i, '');
-    // If the base file doesn't exist with a known extension, just use the SRT path
-    // so auto-save overwrites the SRT itself
+    // Strip extension so auto-save writes back to the same path
     sourceFilePath = browse.path.replace(/\.srt$/i, '');
 
     fileNameDisplay.textContent = fileName;
     fileNameDisplay.classList.add('loaded');
-    wordTimingMode = false;
     allWords = [];
     srtVersion = 0;
     render();
     setStatus(`Loaded ${res.count} cues from ${fileName}`);
     toast(`Loaded ${res.count} cues. Auto-save active.`, 'success');
   } catch (err) { toast('Failed to load file.', 'error'); setStatus('Error.'); }
-});
+}
+btnBrowse.addEventListener('click', openSrtFromDisk);
+if (btnBrowseEmpty) btnBrowseEmpty.addEventListener('click', openSrtFromDisk);
 
 // Auto-format
 btnAutoFormat.addEventListener('click', async () => {
   setStatus('Formatting…');
+  formatPopover.classList.add('hidden');
   try {
     const res = await api('POST', '/api/format', { cues, maxChars, mode: autoFormatMode });
     if (res.error) { toast(res.error, 'error'); return; }
@@ -538,6 +847,30 @@ btnAutoFormat.addEventListener('click', async () => {
     toast('Auto-format applied.', 'success');
     setStatus('Formatted.');
   } catch (e) { toast('Formatting failed.', 'error'); }
+});
+
+// Popover toggles — auto-format settings, overflow menu
+function setupPopover(toggleBtn, popoverEl) {
+  toggleBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = popoverEl.classList.contains('hidden');
+    document.querySelectorAll('.popover').forEach(p => p.classList.add('hidden'));
+    if (open) popoverEl.classList.remove('hidden');
+  });
+}
+setupPopover(btnAutoFormatToggle, formatPopover);
+setupPopover(btnOverflow, overflowMenu);
+
+document.addEventListener('click', (e) => {
+  const clickedMenuItem = !!e.target.closest('.menu-item');
+  document.querySelectorAll('.popover').forEach(p => {
+    if (clickedMenuItem || !p.contains(e.target)) p.classList.add('hidden');
+  });
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    document.querySelectorAll('.popover').forEach(p => p.classList.add('hidden'));
+  }
 });
 
 // Download SRT (clean, grouped)
@@ -553,26 +886,6 @@ btnSave.addEventListener('click', () => {
 });
 
 // Export word-level SRT (for Resolve live mode import)
-btnExportWordSrt.addEventListener('click', async () => {
-  if (!allWords.length) { toast('No words to export.', 'warn'); return; }
-  setStatus('Generating word-level SRT…');
-  try {
-    const res = await api('POST', '/api/export-word-srt', {
-      words: allWords.map(w => ({ word: w.word, start: w.start, end: w.end })),
-    });
-    if (res.error) { toast(res.error, 'error'); return; }
-    const blob = new Blob([res.srt], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    const wordFileName = fileName.replace(/\.srt$/i, '') + '_words.srt';
-    a.href = url; a.download = wordFileName;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    toast('Word-level SRT downloaded. Import this into Resolve for live mode.', 'success', 5000);
-    setStatus(`Exported ${wordFileName}`);
-  } catch (e) { toast('Export failed.', 'error'); }
-});
-
 // Save to path
 btnSaveAs.addEventListener('click', () => {
   saveAsInput.value = fileName || '';
@@ -599,15 +912,19 @@ saveAsInput.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') btnModalCancel.click();
 });
 
-// Read from Resolve
-btnReadResolve.addEventListener('click', async () => {
+// Read from Resolve — shared by toolbar button and landing button
+async function readFromResolve() {
+  if (!resolveOk) {
+    showResolveHelp();
+    return;
+  }
   setStatus('Reading from DaVinci Resolve…');
   try {
     const res = await api('GET', '/api/resolve/read');
     if (res.error) {
       toast(res.error, 'error');
       setStatus('Error.');
-      return;  // Don't wipe editor state on error
+      return;
     }
 
     const readCues = res.cues.map((c, i) => ({ ...c, index: i + 1 }));
@@ -615,7 +932,7 @@ btnReadResolve.addEventListener('click', async () => {
     if (!readCues.length) {
       toast('No subtitle items found in Resolve.', 'warn');
       setStatus('No items in Resolve.');
-      return;  // Don't wipe editor state on empty result
+      return;
     }
 
     // Detect word-level track: most cues are single words
@@ -623,29 +940,57 @@ btnReadResolve.addEventListener('click', async () => {
     const isWordLevel = readCues.length > 10 && singleWordCues.length / readCues.length > 0.8;
 
     if (isWordLevel) {
-      // Word-level track — build allWords directly with resolveIds, then smart-group
       allWords = readCues.map(c => ({
         word: c.text.trim(),
         start: timeToMs(c.startTime) / 1000,
         end: timeToMs(c.endTime) / 1000,
         resolveId: c.resolveId || null,
       }));
-      wordTimingMode = true;
       breakPositions = computeInitialBreaks(allWords);
       cues = flatModelToCues();
+      fileName = 'from-resolve.srt';
+      fileNameDisplay.textContent = fileName;
+      fileNameDisplay.classList.add('loaded');
       render();
-      toast(`Read ${allWords.length} words from Resolve (word-level track, track ${res.trackUsed}). Smart breaks applied.`, 'success', 5000);
+      toast(`Read ${allWords.length} words from Resolve (word-level track ${res.trackUsed}).`, 'success', 5000);
       setStatus(`Loaded ${allWords.length} words from Resolve — ${cues.length} cues.`);
     } else {
-      // Normal subtitle track — load as cues
       cues = readCues;
       allWords = [];
-      wordTimingMode = false;
+      fileName = 'from-resolve.srt';
+      fileNameDisplay.textContent = fileName;
+      fileNameDisplay.classList.add('loaded');
       render();
       toast(`Read ${cues.length} cues from Resolve (track ${res.trackUsed}).`, 'success');
       setStatus(`Loaded ${cues.length} cues from DaVinci Resolve.`);
     }
   } catch (e) { toast('Could not read from Resolve.', 'error'); }
+}
+btnReadResolve.addEventListener('click', readFromResolve);
+
+// Landing's Read from Resolve button — shows help if Resolve isn't connected
+const btnReadEmpty = document.getElementById('btn-read-empty');
+if (btnReadEmpty) btnReadEmpty.addEventListener('click', readFromResolve);
+
+// Help modal
+const resolveHelpOverlay = document.getElementById('resolve-help-overlay');
+const btnHelpClose = document.getElementById('btn-help-close');
+function showResolveHelp() {
+  if (resolveHelpOverlay) resolveHelpOverlay.classList.remove('hidden');
+}
+function hideResolveHelp() {
+  if (resolveHelpOverlay) resolveHelpOverlay.classList.add('hidden');
+}
+if (btnHelpClose) btnHelpClose.addEventListener('click', hideResolveHelp);
+if (resolveHelpOverlay) {
+  resolveHelpOverlay.addEventListener('click', (e) => {
+    if (e.target === resolveHelpOverlay) hideResolveHelp();
+  });
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && resolveHelpOverlay && !resolveHelpOverlay.classList.contains('hidden')) {
+    hideResolveHelp();
+  }
 });
 
 // Save new version — creates a versioned SRT for clean Resolve import
