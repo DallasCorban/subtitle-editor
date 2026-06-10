@@ -19,16 +19,22 @@ import threading
 import uuid
 from typing import Optional
 
-_model = None
+_models: dict = {}  # model_name -> WhisperModel (faster-whisper only; mlx caches via repo path)
 _model_lock = threading.Lock()
 _jobs: dict = {}  # job_id -> job state dict
+
+# Default chosen for verbatim accuracy on clean English voiceover:
+# large-v2 paraphrases noticeably less than large-v3 on this kind of content.
+# Override via SUBTITLE_WHISPER_MODEL env var or per-request `model` argument.
+DEFAULT_FW_MODEL = "large-v2"
+DEFAULT_MLX_MODEL = "mlx-community/whisper-large-v3-turbo"
 
 
 # ---------------------------------------------------------------------------
 # Public API — same shape on both backends
 # ---------------------------------------------------------------------------
 
-def start_transcription(file_path: str, language: str = "en") -> str:
+def start_transcription(file_path: str, language: str = "en", model: str | None = None) -> str:
     """Start a background transcription job. Returns the job ID."""
     if not os.path.isfile(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -48,11 +54,12 @@ def start_transcription(file_path: str, language: str = "en") -> str:
         "words": [],
         "error": None,
         "file": os.path.basename(file_path),
+        "model": model or os.environ.get("SUBTITLE_WHISPER_MODEL", ""),
     }
 
     t = threading.Thread(
         target=_run_transcription,
-        args=(job_id, file_path, language),
+        args=(job_id, file_path, language, model),
         daemon=True,
     )
     t.start()
@@ -64,7 +71,7 @@ def get_job_status(job_id: str) -> Optional[dict]:
 
 
 def get_model_status() -> dict:
-    return {"loaded": _model is not None}
+    return {"loaded": bool(_models), "models": list(_models.keys())}
 
 
 # ---------------------------------------------------------------------------
@@ -75,14 +82,14 @@ def _any_running() -> bool:
     return any(j["status"] == "running" for j in _jobs.values())
 
 
-def _run_transcription(job_id: str, file_path: str, language: str):
+def _run_transcription(job_id: str, file_path: str, language: str, model: str | None):
     """Worker function — runs in a background thread."""
     job = _jobs[job_id]
     try:
         if sys.platform == "darwin":
-            _transcribe_with_mlx(job, file_path, language)
+            _transcribe_with_mlx(job, file_path, language, model)
         else:
-            _transcribe_with_faster_whisper(job, file_path, language)
+            _transcribe_with_faster_whisper(job, file_path, language, model)
         job["progress"] = 1.0
         job["status"] = "complete"
     except Exception as e:
@@ -94,10 +101,15 @@ def _run_transcription(job_id: str, file_path: str, language: str):
 # Backend: faster-whisper (Windows / Linux)
 # ---------------------------------------------------------------------------
 
-def _faster_whisper_settings() -> tuple:
+def _faster_whisper_settings(model_override: str | None = None) -> tuple:
     """Pick (model_size, device, compute_type) for the local hardware."""
+    model = (
+        model_override
+        or os.environ.get("SUBTITLE_WHISPER_MODEL")
+        or DEFAULT_FW_MODEL
+    )
     return (
-        os.environ.get("SUBTITLE_WHISPER_MODEL", "large-v3"),
+        model,
         os.environ.get("SUBTITLE_WHISPER_DEVICE", "auto"),
         os.environ.get("SUBTITLE_WHISPER_COMPUTE_TYPE", "float16"),
     )
@@ -123,28 +135,52 @@ def _setup_cuda_dll_paths() -> None:
                 pass
 
 
-def _ensure_faster_whisper():
-    global _model
-    if _model is not None:
-        return _model
+def _ensure_faster_whisper(model_override: str | None = None):
+    size, device, compute_type = _faster_whisper_settings(model_override)
+    cached = _models.get(size)
+    if cached is not None:
+        print(f"[transcriber] reusing cached model: {size}", flush=True)
+        return cached, size
     with _model_lock:
-        if _model is not None:
-            return _model
+        cached = _models.get(size)
+        if cached is not None:
+            return cached, size
         _setup_cuda_dll_paths()
         from faster_whisper import WhisperModel
-        size, device, compute_type = _faster_whisper_settings()
-        _model = WhisperModel(size, device=device, compute_type=compute_type)
-        return _model
+        print(f"[transcriber] loading model: {size} (device={device}, compute={compute_type})", flush=True)
+        _models[size] = WhisperModel(size, device=device, compute_type=compute_type)
+        print(f"[transcriber] loaded: {size}", flush=True)
+        return _models[size], size
 
 
-def _transcribe_with_faster_whisper(job: dict, file_path: str, language: str):
-    model = _ensure_faster_whisper()
+def _transcribe_with_faster_whisper(job: dict, file_path: str, language: str, model_override: str | None):
+    model, size = _ensure_faster_whisper(model_override)
+    job["model"] = size
     segments_gen, info = model.transcribe(
         file_path,
         language=language,
         beam_size=5,
-        vad_filter=True,
+        best_of=5,
+        # Single float (not the default fallback list) — fallback sampling at
+        # higher temps is a known paraphrase / hallucination source.
+        temperature=0.0,
         word_timestamps=True,
+        # VAD on, but tuned to be less aggressive than defaults — the stock
+        # Silero settings clip soft starts/ends and drop short utterances.
+        vad_filter=True,
+        vad_parameters=dict(
+            threshold=0.3,
+            min_speech_duration_ms=100,
+            min_silence_duration_ms=500,
+            speech_pad_ms=800,
+        ),
+        # Don't carry decoded text forward as context — it causes the model
+        # to drift and truncate on long inputs.
+        condition_on_previous_text=False,
+        no_speech_threshold=0.3,
+        # faster-whisper's built-in fix for the "Whisper invents text over a
+        # short silence" failure mode. Requires word_timestamps=True.
+        hallucination_silence_threshold=2.0,
     )
     job["duration"] = info.duration if info.duration else 0.0
     all_words = []
@@ -157,6 +193,10 @@ def _transcribe_with_faster_whisper(job: dict, file_path: str, language: str):
                         "word": text,
                         "start": round(w.start, 3),
                         "end": round(w.end, 3),
+                        # Per-word confidence in [0,1]. The editor surfaces
+                        # low-probability words as a faint underline so the
+                        # human reviewer knows which ones to double-check.
+                        "probability": round(float(getattr(w, "probability", 1.0) or 0.0), 3),
                     })
         job["segments_done"] += 1
         job["last_segment_end"] = segment.end
@@ -169,10 +209,12 @@ def _transcribe_with_faster_whisper(job: dict, file_path: str, language: str):
 # Backend: mlx-whisper (macOS, Apple Silicon)
 # ---------------------------------------------------------------------------
 
-def _mlx_model_repo() -> str:
+def _mlx_model_repo(model_override: str | None = None) -> str:
     """Default to large-v3-turbo: ~10x realtime on M2 Pro, near-large accuracy."""
-    return os.environ.get(
-        "SUBTITLE_WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo"
+    return (
+        model_override
+        or os.environ.get("SUBTITLE_WHISPER_MODEL")
+        or DEFAULT_MLX_MODEL
     )
 
 
@@ -203,17 +245,23 @@ def _ensure_ffmpeg_on_path() -> None:
     os.environ["PATH"] = cache_bin + os.pathsep + os.environ.get("PATH", "")
 
 
-def _transcribe_with_mlx(job: dict, file_path: str, language: str):
+def _transcribe_with_mlx(job: dict, file_path: str, language: str, model_override: str | None):
     _ensure_ffmpeg_on_path()
     import mlx_whisper
 
-    repo = _mlx_model_repo()
+    repo = _mlx_model_repo(model_override)
+    job["model"] = repo
     result = mlx_whisper.transcribe(
         file_path,
         path_or_hf_repo=repo,
         language=language,
         word_timestamps=True,
         verbose=False,
+        # Disable text-conditioning to prevent the model from drifting and
+        # truncating long passages.
+        condition_on_previous_text=False,
+        no_speech_threshold=0.3,
+        temperature=0.0,
     )
 
     segments = result.get("segments", []) or []
@@ -229,6 +277,7 @@ def _transcribe_with_mlx(job: dict, file_path: str, language: str):
                     "word": text,
                     "start": round(float(w.get("start", 0) or 0), 3),
                     "end": round(float(w.get("end", 0) or 0), 3),
+                    "probability": round(float(w.get("probability", 1.0) or 0.0), 3),
                 })
         job["segments_done"] += 1
         # mlx-whisper returns all segments at once, so we can't show smooth

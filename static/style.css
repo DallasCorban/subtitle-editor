@@ -133,6 +133,21 @@ body.app-loaded #empty-state { display: none !important; }
   white-space: nowrap;
 }
 
+/* Persistent tag in the topbar showing which Whisper model produced
+   the current transcript. Hidden when empty (e.g. loaded from SRT). */
+.model-tag {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--accent);
+  background: rgba(230, 164, 96, .08);
+  border: 1px solid rgba(230, 164, 96, .25);
+  border-radius: 3px;
+  padding: 2px 7px;
+  letter-spacing: .03em;
+  white-space: nowrap;
+}
+.model-tag:empty { display: none; }
+
 .topbar-actions {
   display: flex;
   align-items: center;
@@ -459,6 +474,37 @@ button:active:not(:disabled) { transform: translateY(.5px); }
 }
 .landing-row .btn-primary { padding: 0 18px; }
 
+/* Model picker — small row under the path input */
+.landing-model-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.landing-model-label {
+  font-weight: 500;
+}
+.landing-model-row select {
+  flex: 1 1 auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: var(--sans);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.landing-model-row select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .landing-or {
   display: flex;
   align-items: center;
@@ -565,6 +611,15 @@ button:active:not(:disabled) { transform: translateY(.5px); }
   border-radius: 2px;
   position: relative;
   transition: background .08s;
+}
+
+/* Low-confidence words — Whisper assigned this word a low probability,
+   meaning it's a more likely candidate for a paraphrase / mistranscription.
+   Faint dotted underline says "check me" without shouting. */
+.script-flow .word.low-confidence {
+  text-decoration: underline dotted rgba(217, 119, 106, .55);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
 }
 
 /* ── Break marker — slim amber stroke, manuscript-mark feel ─────────────── */

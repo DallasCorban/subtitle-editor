@@ -30,6 +30,7 @@ let srtVersion     = 0;     // incremented each time user clicks "Save new versi
 const btnBrowse        = document.getElementById('btn-browse');
 const btnBrowseEmpty   = document.getElementById('btn-browse-empty');
 const fileNameDisplay  = document.getElementById('file-name-display');
+const modelTag         = document.getElementById('model-tag');
 const btnSave          = document.getElementById('btn-save');
 const btnSaveAs        = document.getElementById('btn-save-as');
 const btnAutoFormatToggle = document.getElementById('btn-auto-format-toggle');
@@ -57,8 +58,28 @@ const btnModalSave     = document.getElementById('btn-modal-save');
 const transcribePath   = document.getElementById('transcribe-path');
 const btnBrowseMedia   = document.getElementById('btn-browse-media');
 const btnTranscribe    = document.getElementById('btn-transcribe');
+const transcribeModel  = document.getElementById('transcribe-model');
 const transcribeBar    = document.getElementById('transcribe-progress');
 const transcribeFill   = document.getElementById('transcribe-progress-fill');
+
+// Restore the user's last-used model from localStorage (default: large-v2).
+const savedModel = localStorage.getItem('whisperModel');
+if (savedModel && transcribeModel) {
+  // Only restore if the option exists in the dropdown
+  if ([...transcribeModel.options].some(o => o.value === savedModel)) {
+    transcribeModel.value = savedModel;
+  }
+}
+if (transcribeModel) {
+  transcribeModel.addEventListener('change', () => {
+    localStorage.setItem('whisperModel', transcribeModel.value);
+  });
+}
+
+// Words below this Whisper-reported probability get a faint dotted underline.
+// 0.5 hits the sweet spot — flags genuinely uncertain words without
+// underlining most of the transcript.
+const LOW_CONFIDENCE_THRESHOLD = 0.5;
 
 // ── Toast ──────────────────────────────────────────────────────────────
 const toastContainer = (() => {
@@ -107,6 +128,7 @@ function buildFlatModel() {
         word: w,
         start: wStart / 1000,
         end: wEnd / 1000,
+        probability: null,  // unknown — came from an SRT, not a fresh transcription
         resolveId: cue.resolveId || null,
       });
     });
@@ -123,28 +145,34 @@ function flatModelToCues() {
     if (g.length) groups.push(g);
   }
 
-  return groups.map((groupWords, i) => {
-    const text   = groupWords.map(w => w.word).join(' ');
-    const sStart = groupWords[0].start;
-    let   sEnd   = groupWords[groupWords.length - 1].end;
+  const out = groups.map(groupWords => ({
+    text:  groupWords.map(w => w.word).join(' '),
+    start: groupWords[0].start,
+    end:   groupWords[groupWords.length - 1].end,
+  }));
 
-    // Hold the caption through small pauses up to `pauseTolerance` seconds —
-    // extend end time to next group's start when the gap is short enough,
-    // so the caption doesn't briefly disappear between sentences.
-    const next = groups[i + 1];
-    if (next) {
-      const nextStart = next[0].start;
-      const gap = nextStart - sEnd;
-      if (gap > 0 && gap <= pauseTolerance) sEnd = nextStart;
+  // Always keep the current cue on as long as possible:
+  //   • Short pause (0 < gap ≤ pauseTolerance) → extend current's end to next's start.
+  //   • Overlap (gap < 0, common with Whisper's imprecise word timings) → push next's
+  //     start back to current's end, so the next caption doesn't pop in early and
+  //     visually cut the current one short.
+  for (let i = 0; i < out.length - 1; i++) {
+    const cur = out[i];
+    const nxt = out[i + 1];
+    const gap = nxt.start - cur.end;
+    if (gap < 0) {
+      nxt.start = cur.end;
+    } else if (gap > 0 && gap <= pauseTolerance) {
+      cur.end = nxt.start;
     }
+  }
 
-    return {
-      index: i + 1,
-      startTime: msToTime(Math.round(sStart * 1000)),
-      endTime:   msToTime(Math.round(sEnd   * 1000)),
-      text,
-    };
-  });
+  return out.map((g, i) => ({
+    index: i + 1,
+    startTime: msToTime(Math.round(g.start * 1000)),
+    endTime:   msToTime(Math.round(g.end   * 1000)),
+    text: g.text,
+  }));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -157,6 +185,7 @@ function loadTranscriptionWords(words) {
     word: w.word,
     start: w.start,
     end: w.end,
+    probability: typeof w.probability === 'number' ? w.probability : null,
     resolveId: null,
   }));
 
@@ -248,6 +277,16 @@ function render() {
 
     const span = document.createElement('span');
     span.className = 'word';
+    // Flag low-confidence words so the human reviewer can scan for paraphrases.
+    // Skip the flag when probability is null (word didn't come from a fresh
+    // Whisper run — e.g. loaded from SRT or typed by the user).
+    if (
+      typeof wordObj.probability === 'number'
+      && wordObj.probability < LOW_CONFIDENCE_THRESHOLD
+    ) {
+      span.classList.add('low-confidence');
+      span.title = `Whisper confidence: ${Math.round(wordObj.probability * 100)}%`;
+    }
     span.textContent = wordObj.word;
     span.dataset.idx = idx;
     view.appendChild(span);
@@ -269,6 +308,10 @@ function createBreakMarker(breakIdx, wordIdx) {
   marker.className = 'cue-break';
   marker.dataset.breakIdx = breakIdx;
   marker.contentEditable = 'false';
+  // contenteditable=false inside a contenteditable=true root is HTML5-draggable
+  // by default — that hijacks our mousemove-based custom drag. Kill it.
+  marker.setAttribute('draggable', 'false');
+  marker.addEventListener('dragstart', (e) => e.preventDefault());
 
   // Tooltip label — show cue number and time from the word at this break
   const label = document.createElement('span');
@@ -281,6 +324,7 @@ function createBreakMarker(breakIdx, wordIdx) {
   // Drag
   marker.addEventListener('mousedown', (e) => {
     e.preventDefault();
+    e.stopPropagation();
     startDrag(breakIdx, marker);
   });
 
@@ -408,6 +452,7 @@ function createBreakMarkerStub() {
   const marker = document.createElement('span');
   marker.className = 'cue-break';
   marker.contentEditable = 'false';
+  marker.setAttribute('draggable', 'false');
   const label = document.createElement('span');
   label.className = 'break-label';
   marker.appendChild(label);
@@ -606,11 +651,14 @@ function reconcileWords(oldWords, newTokens) {
     if (op.type === 'keep') {
       result.push({ ...oldWords[op.oldIdx] });
     } else if (op.type === 'replace') {
+      // User edited a word — they've effectively vouched for it, so clear
+      // the low-confidence flag (probability: null) but carry over timing.
       const orig = oldWords[op.oldIdx];
       result.push({
         word: newTokens[op.newIdx],
         start: orig.start,
         end: orig.end,
+        probability: null,
         resolveId: orig.resolveId,
       });
     } else if (op.type === 'insert') {
@@ -618,6 +666,7 @@ function reconcileWords(oldWords, newTokens) {
         word: newTokens[op.newIdx],
         start: null,
         end: null,
+        probability: null,
         resolveId: null,
       });
     }
@@ -760,16 +809,14 @@ function updateResolvePill(st) {
   // Don't touch btnPushResolve here — it's always available when cues exist
 }
 
-// Auto-connect on every poll: /api/resolve/connect is idempotent — if Resolve
-// is reachable, this attaches; if not, it returns the same disconnected state
-// /status would have given. This means opening Resolve after the app is already
-// running will pick up the connection within ~5 seconds, no pill click needed.
+// Auto-polling disabled — it floods the Flask console with /api/resolve/connect
+// requests every 5s, which makes it hard to read transcription logs. The pill
+// still works on click (handler below), so connecting to Resolve is one click
+// away when actually needed.
 async function pollResolve() {
   try { updateResolvePill(await api('POST', '/api/resolve/connect')); }
   catch (e) { /* ignore */ }
 }
-setInterval(pollResolve, 5000);
-pollResolve();
 
 // ═══════════════════════════════════════════════════════════════════════
 // EVENT HANDLERS
@@ -824,6 +871,7 @@ async function openSrtFromDisk() {
 
     fileNameDisplay.textContent = fileName;
     fileNameDisplay.classList.add('loaded');
+    if (modelTag) modelTag.textContent = '';  // SRT load — no Whisper model involved
     allWords = [];
     srtVersion = 0;
     render();
@@ -944,6 +992,7 @@ async function readFromResolve() {
         word: c.text.trim(),
         start: timeToMs(c.startTime) / 1000,
         end: timeToMs(c.endTime) / 1000,
+        probability: null,  // from Resolve — no Whisper confidence
         resolveId: c.resolveId || null,
       }));
       breakPositions = computeInitialBreaks(allWords);
@@ -951,6 +1000,7 @@ async function readFromResolve() {
       fileName = 'from-resolve.srt';
       fileNameDisplay.textContent = fileName;
       fileNameDisplay.classList.add('loaded');
+      if (modelTag) modelTag.textContent = '';  // came from Resolve, not from Whisper
       render();
       toast(`Read ${allWords.length} words from Resolve (word-level track ${res.trackUsed}).`, 'success', 5000);
       setStatus(`Loaded ${allWords.length} words from Resolve — ${cues.length} cues.`);
@@ -960,6 +1010,7 @@ async function readFromResolve() {
       fileName = 'from-resolve.srt';
       fileNameDisplay.textContent = fileName;
       fileNameDisplay.classList.add('loaded');
+      if (modelTag) modelTag.textContent = '';  // came from Resolve, not from Whisper
       render();
       toast(`Read ${cues.length} cues from Resolve (track ${res.trackUsed}).`, 'success');
       setStatus(`Loaded ${cues.length} cues from DaVinci Resolve.`);
@@ -1051,7 +1102,8 @@ btnTranscribe.addEventListener('click', async () => {
   setStatus('Starting transcription…');
 
   try {
-    const res = await api('POST', '/api/transcribe', { filePath });
+    const model = transcribeModel ? transcribeModel.value : null;
+    const res = await api('POST', '/api/transcribe', { filePath, model });
     if (res.error) {
       toast(res.error, 'error', 5000);
       setStatus('Transcription failed to start.');
@@ -1090,10 +1142,16 @@ async function pollTranscription() {
       return;
     }
 
-    // Update progress bar
+    // Update progress bar. Before the first segment is processed, the worker
+    // is still loading (or downloading, on first run) the model — say so
+    // explicitly instead of misleadingly showing "Transcribing… 0%".
     const pct = Math.round((job.progress || 0) * 100);
     transcribeFill.style.width = pct + '%';
-    setStatus(`Transcribing… ${pct}%`);
+    if ((job.segments_done || 0) === 0 && pct === 0) {
+      setStatus('Loading model… (first run may download ~3 GB)');
+    } else {
+      setStatus(`Transcribing… ${pct}%`);
+    }
 
     if (job.status === 'complete') {
       stopTranscriptionPolling();
@@ -1103,8 +1161,10 @@ async function pollTranscription() {
         fileName = (job.file || 'transcription').replace(/\.[^.]+$/, '') + '.srt';
         fileNameDisplay.textContent = job.file || 'Transcription';
         fileNameDisplay.classList.add('loaded');
-        toast(`Transcribed ${job.words.length} words.`, 'success');
-        setStatus(`Transcription complete — ${job.words.length} words, ${cues.length} cues.`);
+        if (modelTag) modelTag.textContent = job.model || '';
+        const modelSuffix = job.model ? ` · ${job.model}` : '';
+        toast(`Transcribed ${job.words.length} words${modelSuffix}.`, 'success', 4000);
+        setStatus(`Transcription complete — ${job.words.length} words, ${cues.length} cues${modelSuffix}.`);
 
         // Auto-save SRT next to source file if we have the path
         if (sourceFilePath) {

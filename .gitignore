@@ -4,3 +4,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Local tooling & runtime artifacts (machine-specific, never shared)
+.claude/
+*.log

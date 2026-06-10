@@ -1,4 +1,6 @@
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import webbrowser
@@ -44,32 +46,31 @@ def index():
 
 @app.route('/api/browse-file', methods=['POST'])
 def browse_file():
-    """Open a native file dialog and return the selected path."""
-    import tkinter as tk
-    from tkinter import filedialog
+    """Open a native file dialog and return the selected path.
 
+    Runs in a subprocess: tkinter must own the process's main thread on
+    Windows, and Flask serves us on a worker thread — so doing it inline
+    silently kills the whole server.
+    """
     data = request.get_json() or {}
     mode = data.get('mode', 'media')  # 'media' or 'srt'
 
-    if mode == 'srt':
-        title = 'Select SRT file'
-        filetypes = [('SRT files', '*.srt'), ('All files', '*.*')]
-    else:
-        title = 'Select audio or video file'
-        filetypes = [
-            ('Media files', '*.mp4 *.mov *.mkv *.avi *.webm *.mp3 *.wav *.m4a *.flac *.ogg *.aac *.wma'),
-            ('All files', '*.*'),
-        ]
+    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_filepicker.py')
+    try:
+        result = subprocess.run(
+            [sys.executable, helper, mode],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'File picker timed out.'}), 504
 
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes('-topmost', True)
-    path = filedialog.askopenfilename(title=title, filetypes=filetypes)
-    root.destroy()
+    if result.returncode != 0:
+        return jsonify({'error': result.stderr.strip() or 'File picker failed.'}), 500
 
-    if not path:
-        return jsonify({'path': None})
-    return jsonify({'path': path})
+    path = result.stdout.strip()
+    return jsonify({'path': path or None})
 
 
 # ---------------------------------------------------------------------------
@@ -194,12 +195,15 @@ def transcribe():
     data = request.get_json()
     file_path = (data or {}).get('filePath', '').strip()
     language = (data or {}).get('language', 'en')
+    model = ((data or {}).get('model') or '').strip() or None
 
     if not file_path:
         return jsonify({'error': 'No file path provided.'}), 400
 
+    print(f"[transcribe] requested: file={os.path.basename(file_path)} model={model or '(default)'}", flush=True)
+
     try:
-        job_id = transcriber.start_transcription(file_path, language)
+        job_id = transcriber.start_transcription(file_path, language, model=model)
         return jsonify({'jobId': job_id})
     except FileNotFoundError as e:
         return jsonify({'error': str(e)}), 400

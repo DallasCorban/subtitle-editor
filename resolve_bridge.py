@@ -15,11 +15,13 @@ the rest of the app keeps working as a standalone SRT editor.
 """
 
 import os
+import subprocess
 import sys
 
 _resolve = None
 _connected = False
 _error_msg = ''
+_dll_safe: bool | None = None  # cached probe result; None = not yet probed
 
 
 def _scripting_modules_path() -> str:
@@ -54,8 +56,60 @@ SCRIPTING_MODULES = _scripting_modules_path()
 # Connection
 # ---------------------------------------------------------------------------
 
+def _probe_dll_safe() -> bool:
+    """Try to import DaVinciResolveScript in a subprocess.
+
+    fusionscript.dll is compiled against a specific Python ABI; importing
+    it under an incompatible interpreter (e.g. Python 3.14) crashes the
+    whole process natively — Python try/except can't catch it. So we
+    isolate the probe in a subprocess. If it survives, the in-process
+    import is also safe. If it dies, we permanently mark Resolve as
+    unavailable for this session and the Flask server stays up.
+    """
+    global _dll_safe, _error_msg
+    if _dll_safe is not None:
+        return _dll_safe
+
+    probe_code = (
+        "import sys\n"
+        f"sys.path.insert(0, {SCRIPTING_MODULES!r})\n"
+        "import DaVinciResolveScript\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", probe_code],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        _dll_safe = False
+        _error_msg = f'Resolve DLL probe failed to launch: {e}'
+        return False
+
+    if result.returncode == 0:
+        _dll_safe = True
+        return True
+
+    _dll_safe = False
+    # Non-zero exit: either a Python exception (ImportError if Resolve not
+    # installed) or a native crash (DLL ABI mismatch). Both mean we can't
+    # use Resolve integration this session.
+    stderr_tail = (result.stderr or '').strip().splitlines()
+    hint = stderr_tail[-1] if stderr_tail else f'exit code {result.returncode}'
+    _error_msg = (
+        f'Resolve integration unavailable: {hint}. '
+        f'fusionscript.dll likely requires a different Python version '
+        f'(currently {sys.version_info.major}.{sys.version_info.minor}). '
+        f'The editor still works as a standalone SRT tool.'
+    )
+    return False
+
+
 def connect() -> dict:
     global _resolve, _connected, _error_msg
+
+    if not _probe_dll_safe():
+        _connected = False
+        return {'connected': False, 'error': _error_msg}
 
     # Ensure the module path is on sys.path
     if SCRIPTING_MODULES not in sys.path:

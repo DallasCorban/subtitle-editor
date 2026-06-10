@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Geist:wght@300..700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css?v=22">
+<link rel="stylesheet" href="/static/style.css?v=27">
 </head>
 <body>
 
@@ -17,6 +17,7 @@
 
   <div class="topbar-file" data-when="loaded">
     <span id="file-name-display" class="file-name">No file loaded</span>
+    <span id="model-tag" class="model-tag" title="Whisper model used for this transcript"></span>
     <span id="cue-count" class="cue-count"></span>
   </div>
 
@@ -84,6 +85,15 @@
         <button id="btn-browse-media" class="btn-icon" title="Browse for audio/video file">📂</button>
         <button id="btn-transcribe" class="btn-primary">Transcribe</button>
       </div>
+      <div class="landing-model-row">
+        <label for="transcribe-model" class="landing-model-label">Model</label>
+        <select id="transcribe-model" title="Whisper model — large-v2 is the most verbatim for English voiceover; v3 is sharper but paraphrases more.">
+          <option value="large-v2">large-v2 — most verbatim (recommended)</option>
+          <option value="large-v3">large-v3 — best on accents/noise, more paraphrasing</option>
+          <option value="large-v3-turbo">large-v3-turbo — ~3× faster, slight accuracy hit</option>
+          <option value="distil-large-v3">distil-large-v3 — fastest English-only</option>
+        </select>
+      </div>
       <div id="transcribe-progress" class="progress-bar hidden">
         <div id="transcribe-progress-fill" class="progress-fill"></div>
       </div>
@@ -143,6 +153,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=22"></script>
+<script src="/static/app.js?v=27"></script>
 </body>
 </html>
