@@ -76,10 +76,62 @@ if (transcribeModel) {
   });
 }
 
-// Words below this Whisper-reported probability get a faint dotted underline.
+// Words below this Whisper-reported probability get an amber underline.
 // 0.5 hits the sweet spot — flags genuinely uncertain words without
 // underlining most of the transcript.
 const LOW_CONFIDENCE_THRESHOLD = 0.5;
+
+// ── Spell check ────────────────────────────────────────────────────────
+// Hunspell dictionaries via typo.js (static/vendor/). Checked against both
+// Australian and US English — Whisper itself tends to emit US spellings —
+// and a word is only flagged when it fails both.
+let spellDicts = null;          // [Typo, ...] once dictionaries are parsed
+const spellCache = new Map();   // normalised word -> is misspelled
+
+async function loadSpellcheck() {
+  try {
+    const load = async (name) => {
+      const [aff, dic] = await Promise.all([
+        fetch(`/static/vendor/dict/${name}.aff`).then(r => r.text()),
+        fetch(`/static/vendor/dict/${name}.dic`).then(r => r.text()),
+      ]);
+      return new Typo(name, aff, dic);
+    };
+    spellDicts = await Promise.all([load('en_AU'), load('en_US')]);
+    refreshSpellcheck();  // transcript may already be on screen
+  } catch (e) {
+    console.warn('Spell check unavailable:', e);
+  }
+}
+
+function isMisspelled(rawWord) {
+  if (!spellDicts) return false;
+  // Normalise curly apostrophes, strip surrounding punctuation
+  const word = rawWord
+    .replace(/[’‘]/g, "'")
+    .replace(/^[^\p{L}\p{N}']+|[^\p{L}\p{N}']+$/gu, '');
+  if (!word || /\p{N}/u.test(word)) return false;          // numbers, "3rd"
+  if (word.length > 1 && word === word.toUpperCase()) return false;  // acronyms
+  if (spellCache.has(word)) return spellCache.get(word);
+  const inDict = (w) => spellDicts.some(d => d.check(w));
+  // Hyphenated compounds pass if every part passes; possessives pass if the
+  // base word does ("Resolve's").
+  const bad = word.split('-').filter(Boolean).some(part =>
+    !inDict(part) && !(part.endsWith("'s") && inDict(part.slice(0, -2)))
+  );
+  spellCache.set(word, bad);
+  return bad;
+}
+
+// Re-run spell check over the rendered spans without a full re-render
+// (used when dictionaries finish loading after first paint).
+function refreshSpellcheck() {
+  document.querySelectorAll('#script-view .word').forEach(span => {
+    span.classList.toggle('misspelled', isMisspelled(span.textContent));
+  });
+}
+
+loadSpellcheck();
 
 // ── Toast ──────────────────────────────────────────────────────────────
 const toastContainer = (() => {
@@ -286,6 +338,9 @@ function render() {
     ) {
       span.classList.add('low-confidence');
       span.title = `Whisper confidence: ${Math.round(wordObj.probability * 100)}%`;
+    }
+    if (isMisspelled(wordObj.word)) {
+      span.classList.add('misspelled');
     }
     span.textContent = wordObj.word;
     span.dataset.idx = idx;

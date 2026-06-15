@@ -615,11 +615,21 @@ button:active:not(:disabled) { transform: translateY(.5px); }
 
 /* Low-confidence words — Whisper assigned this word a low probability,
    meaning it's a more likely candidate for a paraphrase / mistranscription.
-   Faint dotted underline says "check me" without shouting. */
+   Amber wavy underline says "check me" without shouting. */
 .script-flow .word.low-confidence {
-  text-decoration: underline dotted rgba(217, 119, 106, .55);
+  text-decoration: underline wavy rgba(232, 162, 60, .85);
   text-decoration-thickness: 1px;
   text-underline-offset: 3px;
+  text-decoration-skip-ink: none;
+}
+
+/* Misspelled — fails both the en_AU and en_US dictionaries. Declared after
+   .low-confidence so red wins when a word is both. */
+.script-flow .word.misspelled {
+  text-decoration: underline wavy rgba(224, 82, 77, .9);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  text-decoration-skip-ink: none;
 }
 
 /* ── Break marker — slim amber stroke, manuscript-mark feel ─────────────── */

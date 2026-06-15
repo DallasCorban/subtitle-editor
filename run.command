@@ -14,4 +14,8 @@ elif [[ "$OSTYPE" == "linux"* ]]; then
 fi
 export PYTHONPATH="$PYTHONPATH:$RESOLVE_SCRIPT_API/Modules"
 
+# Use the project venv if it exists (created by setup), else fall back to python3.
+if [[ -x "$(dirname "$0")/.venv/bin/python" ]]; then
+  exec "$(dirname "$0")/.venv/bin/python" app.py
+fi
 python3 app.py

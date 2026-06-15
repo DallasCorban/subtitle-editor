@@ -8,3 +8,6 @@ build/
 # Local tooling & runtime artifacts (machine-specific, never shared)
 .claude/
 *.log
+
+# Python virtualenv
+.venv/

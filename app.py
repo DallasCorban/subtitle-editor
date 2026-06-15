@@ -276,12 +276,18 @@ def _cues_from_list(cues_data: list) -> list:
 # Entry point
 # ---------------------------------------------------------------------------
 
+# Port 5000 by default, overridable via PORT (macOS AirPlay Receiver also
+# listens on 5000, which can confuse tooling even though we bind 127.0.0.1).
+PORT = int(os.environ.get('PORT', 5000))
+
+
 def _open_browser():
     import time
     time.sleep(1.2)
-    webbrowser.open('http://127.0.0.1:5000')
+    webbrowser.open(f'http://127.0.0.1:{PORT}')
 
 
 if __name__ == '__main__':
-    threading.Thread(target=_open_browser, daemon=True).start()
-    app.run(host='127.0.0.1', port=5000, debug=False)
+    if not os.environ.get('SUBTITLE_NO_BROWSER'):
+        threading.Thread(target=_open_browser, daemon=True).start()
+    app.run(host='127.0.0.1', port=PORT, debug=False)

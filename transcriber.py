@@ -209,13 +209,31 @@ def _transcribe_with_faster_whisper(job: dict, file_path: str, language: str, mo
 # Backend: mlx-whisper (macOS, Apple Silicon)
 # ---------------------------------------------------------------------------
 
+# The UI's model dropdown uses faster-whisper size names (shared with the
+# Windows backend). On Mac those must resolve to mlx-community HF repos —
+# passing a bare size like "large-v2" to mlx-whisper 404s on the Hub.
+_MLX_REPO_FOR_SIZE = {
+    "tiny": "mlx-community/whisper-tiny",
+    "small": "mlx-community/whisper-small-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "large-v2": "mlx-community/whisper-large-v2-mlx",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+    "distil-large-v3": "mlx-community/distil-whisper-large-v3",
+}
+
+
 def _mlx_model_repo(model_override: str | None = None) -> str:
     """Default to large-v3-turbo: ~10x realtime on M2 Pro, near-large accuracy."""
-    return (
+    name = (
         model_override
         or os.environ.get("SUBTITLE_WHISPER_MODEL")
         or DEFAULT_MLX_MODEL
     )
+    if "/" not in name:
+        # Bare size name → mlx repo; unknown sizes fall back to the default.
+        name = _MLX_REPO_FOR_SIZE.get(name, DEFAULT_MLX_MODEL)
+    return name
 
 
 def _ensure_ffmpeg_on_path() -> None:
