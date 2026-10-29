@@ -15,6 +15,7 @@ Ben: transcriptions sometimes get words wrong, e.g. "SVOD" (subscription video o
 - How Micah's voice was set up, and whether Subtitle can copy it (ask Jimmy).
 - Output format for Resolve captions stays as is.
 - Held until Ben has dialled in his Resolve caption preset (font, point size, scale): (1) investigate how caption splits are made today and whether an AI pass at the end would help; (2) live preview boxes for 16:9, 4:5 and 9:16 showing captions at different text sizes, as close to how they'll look in Resolve after import. Main risk: mapping the preview to Resolve's own point size and scale.
+- Later: SRT carries only text and timing, so styling is applied in Resolve. Ben wants Micah to create a subtitle preset for each aspect ratio (9:16, 4:5, 16:9) so he can apply the right one after import.
 
 ## Pointers
 - Ben's Resolve caption preset is "Deloitte black social", saved in Resolve (ask Micah to find where it lives). Open Sans Regular, black box behind the text. Point size by aspect: 28 for 9:16, 38 for 4:5, 47 for 16:9. Ben said he may still tweak the preset and give more info.
