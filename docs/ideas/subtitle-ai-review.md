@@ -14,3 +14,4 @@ Ben: transcriptions sometimes get words wrong, e.g. "SVOD" (subscription video o
 ## Open questions
 - How Micah's voice was set up, and whether Subtitle can copy it (ask Jimmy).
 - Output format for Resolve captions stays as is.
+- Held until Ben has dialled in his Resolve caption preset (font, point size, scale): (1) investigate how caption splits are made today and whether an AI pass at the end would help; (2) live preview boxes for 16:9, 4:5 and 9:16 showing captions at different text sizes, as close to how they'll look in Resolve after import. Main risk: mapping the preview to Resolve's own point size and scale.
