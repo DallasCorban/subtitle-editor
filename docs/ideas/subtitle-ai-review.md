@@ -9,6 +9,7 @@ Ben: transcriptions sometimes get words wrong, e.g. "SVOD" (subscription video o
 - No up-front glossary: Ben doesn't know the terms in advance.
 - Style rules on every pass: no em dashes, Australian English. Put in the review prompt; if that can't be relied on, enforce in the operator's check.
 - Make Subtitle a voice-enabled operator (like Micah) so Ben can chat through the subtitles.
+- Possible later addition (Ben, not yet agreed): let the review pass also judge caption splits. Current splitting is code-based by character length per chosen format and does an okay job, but for social video he wants a target length that stays on screen without running too long, with breaks at natural phrase boundaries. Risk: changes caption count and timing, which Resolve output depends on, so keep it a separate optional step from word fixes.
 
 ## Open questions
 - How Micah's voice was set up, and whether Subtitle can copy it (ask Jimmy).
