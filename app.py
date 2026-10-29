@@ -7,6 +7,7 @@ import webbrowser
 
 from flask import Flask, jsonify, render_template, request
 
+import deepgram_client
 import resolve_bridge
 import transcriber
 from srt_parser import (
@@ -196,14 +197,26 @@ def transcribe():
     file_path = (data or {}).get('filePath', '').strip()
     language = (data or {}).get('language', 'en')
     model = ((data or {}).get('model') or '').strip() or None
+    engine = ((data or {}).get('engine') or 'whisper').strip()
 
     if not file_path:
         return jsonify({'error': 'No file path provided.'}), 400
+    if engine == 'deepgram' and not deepgram_client.has_api_key():
+        return jsonify({
+            'error': 'No Deepgram API key configured. Set DEEPGRAM_API_KEY and '
+                     'restart the app.'
+        }), 400
 
-    print(f"[transcribe] requested: file={os.path.basename(file_path)} model={model or '(default)'}", flush=True)
+    print(
+        f"[transcribe] requested: file={os.path.basename(file_path)} "
+        f"engine={engine} model={model or '(default)'}",
+        flush=True,
+    )
 
     try:
-        job_id = transcriber.start_transcription(file_path, language, model=model)
+        job_id = transcriber.start_transcription(
+            file_path, language, model=model, engine=engine
+        )
         return jsonify({'jobId': job_id})
     except FileNotFoundError as e:
         return jsonify({'error': str(e)}), 400
@@ -240,6 +253,19 @@ def transcribe_upload():
     except Exception as e:
         os.unlink(tmp.name)
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/engines')
+def engines():
+    """Which transcription engines this install can actually run.
+
+    Deepgram needs an API key in the environment; the UI uses this to explain
+    why the speaker option is unavailable instead of failing at click time.
+    """
+    return jsonify({
+        'whisper': True,
+        'deepgram': deepgram_client.has_api_key(),
+    })
 
 
 @app.route('/api/transcribe/status')

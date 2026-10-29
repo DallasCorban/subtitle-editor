@@ -1,12 +1,15 @@
 """
 Whisper transcription service.
 
-Backend is chosen at runtime based on platform:
+Backend is chosen at runtime based on platform, or by explicit request:
 - Apple Silicon Mac → mlx-whisper (Metal-accelerated, ~10x realtime).
 - Windows / Linux   → faster-whisper (CUDA on NVIDIA, CPU fallback).
+- engine="deepgram" → Deepgram Nova-3 in the cloud, which unlike Whisper
+  labels who is speaking. Opt-in per job, for transcripts that need speakers.
 
-Both backends emit the same shape: a list of {"word", "start", "end"} dicts,
-so the rest of the app doesn't care which ran.
+All backends emit the same shape: a list of {"word", "start", "end"} dicts,
+so the rest of the app doesn't care which ran. Deepgram additionally sets
+"speaker" on each word; the Whisper backends leave it None.
 
 Runs in a background thread so the Flask server stays responsive. Only one
 transcription runs at a time (the model uses ~3 GB VRAM/RAM).
@@ -34,7 +37,12 @@ DEFAULT_MLX_MODEL = "mlx-community/whisper-large-v3-turbo"
 # Public API — same shape on both backends
 # ---------------------------------------------------------------------------
 
-def start_transcription(file_path: str, language: str = "en", model: str | None = None) -> str:
+def start_transcription(
+    file_path: str,
+    language: str = "en",
+    model: str | None = None,
+    engine: str = "whisper",
+) -> str:
     """Start a background transcription job. Returns the job ID."""
     if not os.path.isfile(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -55,11 +63,17 @@ def start_transcription(file_path: str, language: str = "en", model: str | None 
         "error": None,
         "file": os.path.basename(file_path),
         "model": model or os.environ.get("SUBTITLE_WHISPER_MODEL", ""),
+        "engine": engine,
+        # Deepgram's batch API is one request, so the UI reports which phase
+        # it's in (extracting / uploading / processing) rather than a
+        # segment count that would sit at zero the whole time.
+        "stage": "",
+        "speakers": 0,
     }
 
     t = threading.Thread(
         target=_run_transcription,
-        args=(job_id, file_path, language, model),
+        args=(job_id, file_path, language, model, engine),
         daemon=True,
     )
     t.start()
@@ -82,11 +96,15 @@ def _any_running() -> bool:
     return any(j["status"] == "running" for j in _jobs.values())
 
 
-def _run_transcription(job_id: str, file_path: str, language: str, model: str | None):
+def _run_transcription(
+    job_id: str, file_path: str, language: str, model: str | None, engine: str = "whisper"
+):
     """Worker function — runs in a background thread."""
     job = _jobs[job_id]
     try:
-        if sys.platform == "darwin":
+        if engine == "deepgram":
+            _transcribe_with_deepgram(job, file_path, language)
+        elif sys.platform == "darwin":
             _transcribe_with_mlx(job, file_path, language, model)
         else:
             _transcribe_with_faster_whisper(job, file_path, language, model)
@@ -95,6 +113,22 @@ def _run_transcription(job_id: str, file_path: str, language: str, model: str | 
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
+
+
+# ---------------------------------------------------------------------------
+# Backend: Deepgram Nova-3 (cloud, speaker-labelled)
+# ---------------------------------------------------------------------------
+
+def _transcribe_with_deepgram(job: dict, file_path: str, language: str):
+    import deepgram_client
+
+    job["model"] = deepgram_client.MODEL
+    words = deepgram_client.transcribe(job, file_path, language)
+    job["words"] = words
+    job["speakers"] = len({
+        w["speaker"] for w in words if w.get("speaker") is not None
+    })
+    job["stage"] = ""
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +231,9 @@ def _transcribe_with_faster_whisper(job: dict, file_path: str, language: str, mo
                         # low-probability words as a faint underline so the
                         # human reviewer knows which ones to double-check.
                         "probability": round(float(getattr(w, "probability", 1.0) or 0.0), 3),
+                        # Whisper can't tell speakers apart — only Deepgram
+                        # fills this in.
+                        "speaker": None,
                     })
         job["segments_done"] += 1
         job["last_segment_end"] = segment.end
@@ -296,6 +333,7 @@ def _transcribe_with_mlx(job: dict, file_path: str, language: str, model_overrid
                     "start": round(float(w.get("start", 0) or 0), 3),
                     "end": round(float(w.get("end", 0) or 0), 3),
                     "probability": round(float(w.get("probability", 1.0) or 0.0), 3),
+                    "speaker": None,
                 })
         job["segments_done"] += 1
         # mlx-whisper returns all segments at once, so we can't show smooth

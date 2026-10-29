@@ -6,9 +6,11 @@ flask>=3.0
 faster-whisper>=1.2  ; sys_platform != "darwin"
 mlx-whisper>=0.4    ; sys_platform == "darwin"
 
-# mlx-whisper shells out to the `ffmpeg` binary for non-WAV input.
-# imageio-ffmpeg bundles a static ffmpeg so users don't need Homebrew.
-imageio-ffmpeg      ; sys_platform == "darwin"
+# A bundled static ffmpeg, used on every platform when the system has none:
+# mlx-whisper shells out to `ffmpeg` for non-WAV input, and the Deepgram
+# path uses it to strip a 5 GB video master down to the 16 kHz mono audio
+# the model actually listens to before uploading.
+imageio-ffmpeg
 
 # CUDA runtime libraries — only on Windows/Linux where NVIDIA GPUs apply.
 nvidia-cublas-cu12  ; sys_platform != "darwin"

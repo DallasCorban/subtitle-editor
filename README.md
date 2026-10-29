@@ -6,11 +6,15 @@ before pulling them into DaVinci Resolve. Runs on Windows and macOS.
 ## What it does
 
 1. **Transcribe** a video or audio file using faster-whisper (word-level
-   timestamps).
+   timestamps), or Deepgram Nova-3 when you also need to know *who* is
+   speaking.
 2. **Edit** the captions in a script-flow editor: type to fix words, drag
    the blue markers to retime the breaks, press Enter to insert a new
    break at the cursor.
-3. **Round-trip** with DaVinci Resolve: pull captions from your active
+3. **Read it as a document** — the Transcript view regroups the same words
+   into speaker paragraphs with editable names, and exports a `.txt` you
+   can hand to someone else.
+4. **Round-trip** with DaVinci Resolve: pull captions from your active
    timeline, edit them, save a versioned SRT, drag it back onto the
    timeline.
 
@@ -32,6 +36,51 @@ You need Python 3.11+ on your machine. Get it from
 1. Download or clone this repo.
 2. Double-click **`setup.bat`** (one time only).
 3. Double-click **`run.bat`** to start the app.
+
+## Transcript documents and speaker names
+
+The **Transcript** tab in the top bar shows the same transcript as a
+readable document rather than as captions: one paragraph per speaker turn,
+each headed by a timestamp and a speaker name.
+
+- **Click a speaker name to rename it.** The new name replaces that
+  speaker everywhere in the document and is remembered per file.
+- **Hover a paragraph and click ▾** to reassign it to a different speaker,
+  or to add a new one. Diarization gets some turns wrong, so fixing one is
+  meant to be a single click.
+- **Download .txt** writes the document out with `[HH:MM:SS] Name:` headings.
+  Turn the **Timestamps** checkbox off to omit them.
+
+Text edits made in either view flow into the other — both read from the
+same word list. Heavier edits in the Transcript view can shift the caption
+break positions, so re-run **Auto-format** in the Captions view afterwards
+if you're also delivering an SRT.
+
+Whisper has no concept of speakers, so a Whisper transcript opens as a
+single speaker you can rename and split up by hand. For automatic speaker
+labels, use Deepgram.
+
+## Speaker identification (Deepgram)
+
+Whisper is the more verbatim transcriber for clean single-speaker voiceover,
+but it cannot tell speakers apart. Ticking **Identify speakers** on the
+landing screen runs Deepgram Nova-3 instead, which returns a speaker label
+attached to every word — and is stronger than Whisper on the multi-speaker
+interview audio that actually needs diarizing.
+
+This is the one part of the app that is **not local**: the audio is uploaded
+to Deepgram. The app strips the file down to 16 kHz mono FLAC first, so it
+sends the audio rather than your video master. Batch transcription runs
+about US$0.26/hour with diarization included.
+
+To enable it, set an API key in your environment before launching:
+
+```
+setx DEEPGRAM_API_KEY "your-key-here"        # Windows, one time
+export DEEPGRAM_API_KEY="your-key-here"      # macOS / Linux
+```
+
+Without a key the option is greyed out and everything else works as before.
 
 ## DaVinci Resolve integration
 

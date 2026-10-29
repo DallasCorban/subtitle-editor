@@ -7,13 +7,27 @@
 let cues           = [];
 let fileName       = 'subtitles.srt';
 let resolveOk      = false;
-let maxChars       = 42;
 let autoFormatMode = 'two_line';
+
+// Aspect ratio → how many characters fit on one caption line before it
+// wraps or shrinks. Wide frames give captions room; vertical crops don't.
+const ASPECT_MAX_CHARS = { '16:9': 42, '1:1': 32, '4:5': 30, '9:16': 24 };
+let aspectRatio = localStorage.getItem('aspectRatio') || '16:9';
+if (aspectRatio !== 'custom' && !(aspectRatio in ASPECT_MAX_CHARS)) aspectRatio = '16:9';
+let maxChars = parseInt(localStorage.getItem('maxChars'), 10)
+  || ASPECT_MAX_CHARS[aspectRatio] || 42;
 
 // Hold a cue through silences up to this many seconds before letting it cut out
 let pauseTolerance = parseFloat(localStorage.getItem('pauseTolerance')) || 2.0;
 
-// Flat model — each word is {word, start, end, resolveId}
+// Which view is on screen: 'captions' (the SRT editor) or 'transcript'
+// (speaker-separated prose for handing to someone else).
+let viewMode = localStorage.getItem('viewMode') === 'transcript' ? 'transcript' : 'captions';
+let showTimestamps = localStorage.getItem('showTimestamps') !== 'false';
+let speakerNames = {};   // speaker id -> the name the user typed
+let deepgramReady = false;
+
+// Flat model — each word is {word, start, end, speaker, resolveId}
 let allWords       = [];      // [{word:"hello", start:0.0, end:0.4, resolveId:null}, …]
 let breakPositions = [];      // sorted indices into allWords where a new cue starts
 
@@ -53,6 +67,14 @@ const modalOverlay     = document.getElementById('modal-overlay');
 const saveAsInput      = document.getElementById('save-as-input');
 const btnModalCancel   = document.getElementById('btn-modal-cancel');
 const btnModalSave     = document.getElementById('btn-modal-save');
+
+// Transcript view DOM refs
+const viewCaptionsBtn   = document.getElementById('view-captions');
+const viewTranscriptBtn = document.getElementById('view-transcript');
+const btnExportTxt      = document.getElementById('btn-export-txt');
+const showTimestampsInput = document.getElementById('show-timestamps');
+const transcribeDiarize   = document.getElementById('transcribe-diarize');
+const diarizeUnavailable  = document.getElementById('diarize-unavailable');
 
 // Transcription DOM refs
 const transcribePath   = document.getElementById('transcribe-path');
@@ -181,6 +203,7 @@ function buildFlatModel() {
         start: wStart / 1000,
         end: wEnd / 1000,
         probability: null,  // unknown — came from an SRT, not a fresh transcription
+        speaker: null,      // an SRT has no speaker information
         resolveId: cue.resolveId || null,
       });
     });
@@ -238,50 +261,110 @@ function loadTranscriptionWords(words) {
     start: w.start,
     end: w.end,
     probability: typeof w.probability === 'number' ? w.probability : null,
+    // Only Deepgram fills this in; Whisper sends null.
+    speaker: typeof w.speaker === 'number' ? w.speaker : null,
     resolveId: null,
   }));
 
   // Compute initial break positions based on pauses and max line length
-  breakPositions = computeInitialBreaks(allWords);
+  breakPositions = computeSmartBreaks(allWords, maxChars);
 
   // Build cues from the flat model
   cues = flatModelToCues();
   render();
 }
 
-function computeInitialBreaks(words) {
-  if (words.length <= 1) return [];
+// Words a cue shouldn't end on — articles, conjunctions, prepositions,
+// auxiliaries, possessives. Ending a cue here splits a phrase mid-thought
+// ("she went to the / shops" reads badly; "she went / to the shops" is fine).
+const WEAK_TAIL = new Set([
+  'a', 'an', 'the', 'and', 'but', 'or', 'nor', 'of', 'to', 'in', 'on', 'at',
+  'by', 'for', 'with', 'from', 'as', 'into', 'onto', 'over', 'under', 'than',
+  'that', 'which', 'who', 'whose', 'whom', 'if', 'so', 'because', 'while',
+  'when', 'where', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am',
+  'has', 'have', 'had', 'will', 'would', 'can', 'could', 'should', 'shall',
+  'may', 'might', 'must', 'not', 'very', 'quite', 'their', 'his', 'her',
+  'its', 'my', 'your', 'our', 'this', 'these', 'those', 'each', 'every',
+  'some', 'any', 'no', "i'm", "we're", "you're", "it's", "he's", "she's",
+  "they're", "there's", "that's", "what's", "don't", "doesn't", "isn't",
+  "aren't", "won't", "can't",
+]);
 
-  const breaks = [];
-  let groupStart = 0;
-  let groupChars = 0;
+function _bareWord(w) {
+  return w.toLowerCase().replace(/[^a-z']/g, '');
+}
 
-  for (let i = 0; i < words.length; i++) {
-    groupChars += words[i].word.length + (i > groupStart ? 1 : 0); // +1 for space
+// Find break positions by minimizing a global cost over all possible
+// segmentations (dynamic programming), instead of greedily cutting when a
+// line fills up. Each candidate cue is scored on:
+//   • boundary quality — real audio pauses, sentence/clause punctuation,
+//     and never stranding a weak connective word at the end of a cue
+//   • line fill — prefer comfortably full lines for the chosen aspect
+//     ratio over ragged short ones
+//   • rhythm — penalize blink-and-miss cues (<0.8s) and long silences
+//     trapped inside a cue
+function computeSmartBreaks(words, limit) {
+  const n = words.length;
+  if (n <= 1) return [];
 
-    const atEnd = i === words.length - 1;
-    if (atEnd) continue;
+  // segLen(i, j) = characters of words[i..j) joined with single spaces
+  const prefix = new Float64Array(n + 1);
+  for (let i = 0; i < n; i++) prefix[i + 1] = prefix[i] + words[i].word.length;
+  const segLen = (i, j) => (prefix[j] - prefix[i]) + (j - i - 1);
 
-    const gap = words[i + 1].start - words[i].end;
-    const isPause = gap >= 0.5;
-    const isTooLong = groupChars > maxChars;
-    const isPunct = /[.!?;]$/.test(words[i].word);
-    const isComma = /,$/.test(words[i].word);
+  // Quality of ending a cue just before words[k]; lower = better.
+  function boundaryCost(k) {
+    if (k >= n) return -8;  // the very end of the transcript is always fine
+    const prev = words[k - 1];
+    const next = words[k];
+    let cost = 0;
+    if (/[.!?…]["')\]]*$/.test(prev.word)) cost -= 14;        // sentence end
+    else if (/[,;:—–]["')\]]*$/.test(prev.word)) cost -= 7;   // clause end
+    const gap = (next.start ?? 0) - (prev.end ?? 0);
+    if (gap > 0) cost -= Math.min(12, gap * 10);              // spoken pause
+    if (WEAK_TAIL.has(_bareWord(prev.word))) cost += 11;      // stranded connective
+    return cost;
+  }
 
-    // Break on: significant pause, line too long, or sentence-ending punctuation
-    if (isPause || isTooLong || (isPunct && groupChars > 15)) {
-      breaks.push(i + 1);
-      groupStart = i + 1;
-      groupChars = 0;
-    } else if (isComma && groupChars > 30) {
-      // Break on comma if line is getting long
-      breaks.push(i + 1);
-      groupStart = i + 1;
-      groupChars = 0;
+  // Cost of one cue spanning words[i..j).
+  function cueCost(i, j) {
+    const len = segLen(i, j);
+    // A cue must fit on one line — unless it's a single unbreakable word.
+    if (len > limit && j - i > 1) return Infinity;
+
+    let cost = 0;
+    const fill = Math.min(1, len / limit);
+    cost += (1 - fill) * (1 - fill) * 18;                     // underfilled line
+
+    const dur = (words[j - 1].end ?? 0) - (words[i].start ?? 0);
+    if (dur < 0.8) cost += 8;                                 // flashes too fast
+    if (j - i === 1) cost += 6;                               // lone-word cue
+
+    // Long silence trapped inside the cue → text lingers over dead air
+    for (let k = i + 1; k < j; k++) {
+      const g = (words[k].start ?? 0) - (words[k - 1].end ?? 0);
+      if (g > 1.0) cost += Math.min(12, (g - 1.0) * 6);
+    }
+    return cost + boundaryCost(j);
+  }
+
+  // best[j] = minimal cost to segment words[0..j)
+  const best = new Float64Array(n + 1).fill(Infinity);
+  const back = new Int32Array(n + 1).fill(-1);
+  best[0] = 0;
+  for (let j = 1; j <= n; j++) {
+    for (let i = j - 1; i >= 0; i--) {
+      if (segLen(i, j) > limit && j - i > 1) break;  // longer spans only get worse
+      const c = best[i] + cueCost(i, j);
+      if (c < best[j]) { best[j] = c; back[j] = i; }
     }
   }
 
-  return breaks;
+  const breaks = [];
+  for (let j = n; j > 0; j = back[j]) {
+    if (back[j] > 0) breaks.push(back[j]);
+  }
+  return breaks.reverse();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -294,13 +377,13 @@ function render() {
     buildFlatModel();
   }
 
-  const old = document.getElementById('script-view');
-  if (old) old.remove();
+  document.querySelectorAll('#script-view, #transcript-view').forEach(el => el.remove());
+  closeSpeakerMenu();
 
   // Toggle loaded/empty UI based on whether we have content
   document.body.classList.toggle('app-loaded', !!allWords.length);
+  document.body.classList.toggle('view-transcript', viewMode === 'transcript');
 
-  cueCountEl.textContent       = cues.length ? `${cues.length} cues` : '';
   btnSave.disabled             = !cues.length;
   btnSaveAs.disabled           = !cues.length;
   btnAutoFormatToggle.disabled = !cues.length;
@@ -308,8 +391,20 @@ function render() {
   btnReadResolve.disabled      = !resolveOk;
   btnPushResolve.disabled      = !cues.length;
 
-  if (!allWords.length) return;
+  if (!allWords.length) {
+    cueCountEl.textContent = '';
+    return;
+  }
 
+  if (viewMode === 'transcript') {
+    renderTranscriptView();
+  } else {
+    cueCountEl.textContent = cues.length ? `${cues.length} cues` : '';
+    renderCaptionView();
+  }
+}
+
+function renderCaptionView() {
   const view = document.createElement('div');
   view.id = 'script-view';
   view.className = 'script-flow';
@@ -714,6 +809,7 @@ function reconcileWords(oldWords, newTokens) {
         start: orig.start,
         end: orig.end,
         probability: null,
+        speaker: orig.speaker ?? null,
         resolveId: orig.resolveId,
       });
     } else if (op.type === 'insert') {
@@ -722,6 +818,7 @@ function reconcileWords(oldWords, newTokens) {
         start: null,
         end: null,
         probability: null,
+        speaker: null,   // inherited from the preceding word below
         resolveId: null,
       });
     }
@@ -754,6 +851,12 @@ function reconcileWords(oldWords, newTokens) {
     } else {
       i++;
     }
+  }
+
+  // A word typed into the middle of someone's paragraph belongs to that
+  // someone — inherit the speaker of the word it follows.
+  for (let k = 1; k < result.length; k++) {
+    if (result[k].speaker == null) result[k].speaker = result[k - 1].speaker;
   }
 
   return result;
@@ -833,10 +936,381 @@ function msToTime(ms) {
 }
 function pad(n, w = 2) { return String(n).padStart(w, '0'); }
 
+function downloadBlob(text, name) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function serializeSRT(list) {
   return list.map((c, i) =>
     `${i + 1}\n${c.startTime} --> ${c.endTime}\n${c.text}`
   ).join('\n\n') + '\n';
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TRANSCRIPT VIEW — the same words as a readable document
+//
+// Captions and a transcript document want opposite things: captions want
+// short timed fragments, a document wants whole paragraphs attributed to a
+// person. Both read from the same allWords[] — the caption view groups it
+// with breakPositions[], this one groups it by who is speaking.
+// ═══════════════════════════════════════════════════════════════════════
+
+// A speaker who pauses this long has finished a thought — start a new
+// paragraph even though they're still the one talking.
+const PARAGRAPH_GAP_S = 2.0;
+// Hard ceiling so an uninterrupted monologue still breaks up; only applied
+// at a sentence end so it never cuts mid-thought.
+const PARAGRAPH_MAX_WORDS = 110;
+
+function speakerKey(id) { return id == null ? 'none' : String(id); }
+
+function speakerLabel(id) {
+  const named = speakerNames[speakerKey(id)];
+  if (named) return named;
+  return id == null ? 'Speaker' : `Speaker ${id + 1}`;
+}
+
+// Distinct hue per speaker, walked around the wheel so adjacent speakers
+// never land on similar colours.
+function speakerHue(id) { return id == null ? 30 : (id * 67 + 28) % 360; }
+
+function speakerIds() {
+  const seen = new Set(allWords.map(w => w.speaker ?? null));
+  return [...seen].sort((a, b) => (a ?? -1) - (b ?? -1));
+}
+
+function nextSpeakerId() {
+  const nums = allWords.map(w => w.speaker).filter(v => typeof v === 'number');
+  return nums.length ? Math.max(...nums) + 1 : 0;
+}
+
+// A Whisper transcript has no speaker data at all. Rather than special-case
+// null everywhere, fold it into speaker 0 on the way into this view — then
+// every downstream path is uniformly integer-keyed, and the user can split
+// paragraphs off to a second speaker by hand.
+function ensureSpeakers() {
+  if (!allWords.length) return;
+  if (allWords.every(w => w.speaker == null)) {
+    allWords.forEach(w => { w.speaker = 0; });
+  }
+}
+
+function buildParagraphs() {
+  const paras = [];
+  let cur = null;
+  allWords.forEach((w, idx) => {
+    const prev = idx > 0 ? allWords[idx - 1] : null;
+    const gap = prev ? (w.start ?? 0) - (prev.end ?? 0) : 0;
+    const speakerChanged = cur && cur.speaker !== (w.speaker ?? null);
+    const longPause = cur && gap > PARAGRAPH_GAP_S;
+    const overlong = cur
+      && (idx - cur.startIdx) >= PARAGRAPH_MAX_WORDS
+      && prev && /[.!?…]["')\]]*$/.test(prev.word);
+
+    if (!cur || speakerChanged || longPause || overlong) {
+      cur = { speaker: w.speaker ?? null, startIdx: idx, endIdx: idx };
+      paras.push(cur);
+    } else {
+      cur.endIdx = idx;
+    }
+  });
+  return paras;
+}
+
+// ── Speaker names persist per file, so a reload doesn't lose the work ──
+function speakerStoreKey() { return `speakerNames:${fileName}`; }
+
+function loadSpeakerNames() {
+  try {
+    speakerNames = JSON.parse(localStorage.getItem(speakerStoreKey())) || {};
+  } catch (e) { speakerNames = {}; }
+}
+
+function saveSpeakerNames() {
+  try {
+    localStorage.setItem(speakerStoreKey(), JSON.stringify(speakerNames));
+  } catch (e) { /* storage full or blocked — names still work this session */ }
+}
+
+// ── Render ─────────────────────────────────────────────────────────────
+function renderTranscriptView() {
+  ensureSpeakers();
+
+  const paras = buildParagraphs();
+  const ids = speakerIds();
+  cueCountEl.textContent =
+    `${paras.length} paragraph${paras.length === 1 ? '' : 's'} · ` +
+    `${ids.length} speaker${ids.length === 1 ? '' : 's'}`;
+
+  const view = document.createElement('article');
+  view.id = 'transcript-view';
+  view.className = 'transcript-doc';
+
+  const head = document.createElement('header');
+  head.className = 'transcript-head';
+  const h1 = document.createElement('h1');
+  h1.className = 'transcript-title';
+  h1.textContent = transcriptTitle();
+  const meta = document.createElement('p');
+  meta.className = 'transcript-meta';
+  meta.textContent = 'Click a speaker name to rename it everywhere · ▾ reassigns a paragraph';
+  head.append(h1, meta);
+  view.appendChild(head);
+
+  paras.forEach(p => view.appendChild(renderParagraph(p)));
+  container.appendChild(view);
+}
+
+function renderParagraph(p) {
+  const block = document.createElement('section');
+  block.className = 'para';
+
+  const head = document.createElement('div');
+  head.className = 'para-head';
+  head.contentEditable = 'false';
+
+  if (showTimestamps) {
+    const t = document.createElement('span');
+    t.className = 'para-time';
+    t.textContent = hhmmss(allWords[p.startIdx].start ?? 0);
+    head.appendChild(t);
+  }
+
+  const chip = document.createElement('span');
+  chip.className = 'speaker-chip';
+  chip.setAttribute('role', 'button');
+  chip.tabIndex = 0;
+  chip.style.setProperty('--sp-hue', String(speakerHue(p.speaker)));
+  chip.textContent = speakerLabel(p.speaker);
+  chip.title = 'Click to rename this speaker everywhere';
+  chip.addEventListener('click', () => beginRenameSpeaker(chip, p.speaker));
+  chip.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      beginRenameSpeaker(chip, p.speaker);
+    }
+  });
+  head.appendChild(chip);
+
+  const reassign = document.createElement('button');
+  reassign.className = 'para-reassign';
+  reassign.textContent = '▾';
+  reassign.title = 'Assign this paragraph to a different speaker';
+  reassign.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openSpeakerMenu(head, p);
+  });
+  head.appendChild(reassign);
+
+  const body = document.createElement('p');
+  body.className = 'para-body';
+  body.contentEditable = 'true';
+  body.spellcheck = false;
+  for (let i = p.startIdx; i <= p.endIdx; i++) {
+    if (i > p.startIdx) body.appendChild(document.createTextNode(' '));
+    body.appendChild(wordSpan(allWords[i], i));
+  }
+  // Reconcile on blur rather than on every keystroke: re-rendering mid-type
+  // would fight the caret, and nothing here is timing-sensitive.
+  body.addEventListener('blur', reconcileTranscriptFromDOM);
+
+  block.append(head, body);
+  return block;
+}
+
+// Shared with the caption view so the confidence and spelling cues a
+// reviewer relies on look identical in both.
+function wordSpan(wordObj, idx) {
+  const span = document.createElement('span');
+  span.className = 'word';
+  if (
+    typeof wordObj.probability === 'number'
+    && wordObj.probability < LOW_CONFIDENCE_THRESHOLD
+  ) {
+    span.classList.add('low-confidence');
+    span.title = `Confidence: ${Math.round(wordObj.probability * 100)}%`;
+  }
+  if (isMisspelled(wordObj.word)) span.classList.add('misspelled');
+  span.textContent = wordObj.word;
+  span.dataset.idx = idx;
+  return span;
+}
+
+// ── Editing ────────────────────────────────────────────────────────────
+function reconcileTranscriptFromDOM() {
+  const bodies = document.querySelectorAll('#transcript-view .para-body');
+  if (!bodies.length) return;
+
+  const tokens = [];
+  bodies.forEach(b => {
+    (b.textContent || '').split(/\s+/).filter(Boolean).forEach(t => tokens.push(t));
+  });
+
+  if (!tokens.length) return;  // don't let a stray select-all-delete wipe the file
+  if (tokens.join(' ') === allWords.map(w => w.word).join(' ')) return;
+
+  allWords = reconcileWords(allWords, tokens);
+  // Caption breaks are indices into allWords, so an insert or delete here
+  // shifts everything after it. Typo fixes (equal-length replacements) keep
+  // them exact; after heavier edits, re-run Auto-format in the caption view.
+  breakPositions = breakPositions.filter(b => b > 0 && b < allWords.length);
+  cues = flatModelToCues();
+  render();
+  setStatus('Transcript edited.');
+  autoSaveSRT(true);
+}
+
+function beginRenameSpeaker(chip, speakerId) {
+  // The chip keeps its click/Enter listeners while it's being edited, so
+  // pressing Enter to commit would otherwise re-enter this function and
+  // stack a second set of handlers instead of finishing the rename.
+  if (chip.dataset.renaming === '1') return;
+  chip.dataset.renaming = '1';
+
+  const current = speakerLabel(speakerId);
+  chip.contentEditable = 'true';
+  chip.classList.add('editing');
+  chip.focus();
+
+  const range = document.createRange();
+  range.selectNodeContents(chip);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+
+  const finish = () => {
+    chip.removeEventListener('blur', finish);
+    chip.removeEventListener('keydown', onKey);
+    delete chip.dataset.renaming;
+    chip.contentEditable = 'false';
+    chip.classList.remove('editing');
+    chip.blur();   // safe — the blur listener is already detached
+
+    const name = (chip.textContent || '').trim();
+    if (!name || name === current) { chip.textContent = current; return; }
+    speakerNames[speakerKey(speakerId)] = name;
+    saveSpeakerNames();
+    render();
+    setStatus(`Renamed to ${name}.`);
+  };
+  // Enter commits directly rather than via chip.blur(): a blur event isn't
+  // guaranteed to fire (an unfocused window won't emit one), and losing a
+  // rename because the commit never ran is worse than a stray caret.
+  const onKey = (e) => {
+    if (e.key === 'Enter')  { e.preventDefault(); finish(); }
+    if (e.key === 'Escape') { e.preventDefault(); chip.textContent = current; finish(); }
+  };
+
+  chip.addEventListener('blur', finish);
+  chip.addEventListener('keydown', onKey);
+}
+
+// ── Reassigning a paragraph to another speaker ─────────────────────────
+// Diarization gets some turns wrong, so fixing one has to be quick.
+function closeSpeakerMenu() {
+  document.querySelectorAll('.speaker-menu').forEach(m => m.remove());
+}
+
+function openSpeakerMenu(anchorEl, para) {
+  const alreadyOpen = anchorEl.querySelector('.speaker-menu');
+  closeSpeakerMenu();
+  if (alreadyOpen) return;
+
+  const menu = document.createElement('div');
+  menu.className = 'popover speaker-menu';
+  menu.contentEditable = 'false';
+
+  speakerIds().forEach(id => {
+    const item = document.createElement('button');
+    item.className = 'menu-item';
+    if (id === para.speaker) item.classList.add('is-current');
+    item.textContent = speakerLabel(id);
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      assignParagraph(para, id);
+    });
+    menu.appendChild(item);
+  });
+
+  const add = document.createElement('button');
+  add.className = 'menu-item menu-item-new';
+  add.textContent = '+ New speaker';
+  add.addEventListener('click', (e) => {
+    e.stopPropagation();
+    assignParagraph(para, nextSpeakerId());
+  });
+  menu.appendChild(add);
+
+  anchorEl.appendChild(menu);
+}
+
+function assignParagraph(para, speakerId) {
+  for (let i = para.startIdx; i <= para.endIdx; i++) {
+    allWords[i].speaker = speakerId;
+  }
+  closeSpeakerMenu();
+  render();
+  setStatus(`Paragraph assigned to ${speakerLabel(speakerId)}.`);
+}
+
+// ── Export ─────────────────────────────────────────────────────────────
+function transcriptTitle() {
+  // An audio export of a video is often named "talk.mp4.mp3", which becomes
+  // "talk.mp4.srt" on load — so drop any media extensions stacked under the
+  // last one too, or the document ends up titled "talk.mp4".
+  return (fileName || 'Transcript')
+    .replace(/\.[^.]+$/, '')
+    .replace(/(\.(mp3|mp4|m4a|m4v|mov|wav|aac|flac|ogg|opus|mkv|mxf|avi|webm))+$/i, '');
+}
+
+function hhmmss(sec) {
+  const total = Math.max(0, Math.floor(sec || 0));
+  return `${pad(Math.floor(total / 3600))}:${pad(Math.floor((total % 3600) / 60))}:${pad(total % 60)}`;
+}
+
+function buildTranscriptText() {
+  const title = transcriptTitle();
+  const out = [title, '='.repeat(Math.max(3, title.length)), ''];
+
+  buildParagraphs().forEach(p => {
+    const name = speakerLabel(p.speaker);
+    out.push(showTimestamps
+      ? `[${hhmmss(allWords[p.startIdx].start ?? 0)}] ${name}:`
+      : `${name}:`);
+    // Left unwrapped on purpose — soft-wrapping editors handle it, and it
+    // pastes into Word or Docs as real paragraphs instead of ragged lines.
+    out.push(allWords.slice(p.startIdx, p.endIdx + 1).map(w => w.word).join(' '));
+    out.push('');
+  });
+
+  // CRLF — this file gets handed to someone else, quite possibly on Windows.
+  return out.join('\r\n');
+}
+
+// ── View switching ─────────────────────────────────────────────────────
+function setViewMode(mode) {
+  if (mode === viewMode) return;
+
+  // Flush whatever the outgoing view has pending before we throw its DOM away
+  if (viewMode === 'transcript') {
+    reconcileTranscriptFromDOM();
+  } else if (reconcileTimer) {
+    clearTimeout(reconcileTimer);
+    reconcileFromDOM();
+  }
+
+  viewMode = mode;
+  localStorage.setItem('viewMode', mode);
+  viewCaptionsBtn.classList.toggle('is-active', mode === 'captions');
+  viewTranscriptBtn.classList.toggle('is-active', mode === 'transcript');
+  render();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -878,9 +1352,30 @@ async function pollResolve() {
 // ═══════════════════════════════════════════════════════════════════════
 
 // Settings
+const aspectRatioSelect = document.getElementById('aspect-ratio');
+if (aspectRatioSelect) {
+  aspectRatioSelect.value = aspectRatio;
+  aspectRatioSelect.addEventListener('change', () => {
+    aspectRatio = aspectRatioSelect.value;
+    localStorage.setItem('aspectRatio', aspectRatio);
+    if (aspectRatio !== 'custom') {
+      maxChars = ASPECT_MAX_CHARS[aspectRatio];
+      maxCharsInput.value = maxChars;
+      localStorage.setItem('maxChars', String(maxChars));
+    }
+  });
+}
+maxCharsInput.value = maxChars;
 maxCharsInput.addEventListener('change', () => {
   maxChars = Math.max(10, Math.min(120, +maxCharsInput.value));
   maxCharsInput.value = maxChars;
+  localStorage.setItem('maxChars', String(maxChars));
+  // A hand-tuned char count is no longer a preset
+  if (aspectRatioSelect && maxChars !== ASPECT_MAX_CHARS[aspectRatio]) {
+    aspectRatio = 'custom';
+    aspectRatioSelect.value = 'custom';
+    localStorage.setItem('aspectRatio', 'custom');
+  }
 });
 formatModeSelect.addEventListener('change', () => { autoFormatMode = formatModeSelect.value; });
 
@@ -921,14 +1416,16 @@ async function openSrtFromDisk() {
 
     cues = res.cues;
     fileName = browse.path.split(/[/\\]/).pop();
-    // Strip extension so auto-save writes back to the same path
-    sourceFilePath = browse.path.replace(/\.srt$/i, '');
+    // Keep the full path — autoSaveSRT strips the final extension itself.
+    // (Stripping .srt here too made "my.video.srt" auto-save to "my.srt".)
+    sourceFilePath = browse.path;
 
     fileNameDisplay.textContent = fileName;
     fileNameDisplay.classList.add('loaded');
     if (modelTag) modelTag.textContent = '';  // SRT load — no Whisper model involved
     allWords = [];
     srtVersion = 0;
+    loadSpeakerNames();
     render();
     setStatus(`Loaded ${res.count} cues from ${fileName}`);
     toast(`Loaded ${res.count} cues. Auto-save active.`, 'success');
@@ -941,6 +1438,21 @@ if (btnBrowseEmpty) btnBrowseEmpty.addEventListener('click', openSrtFromDisk);
 btnAutoFormat.addEventListener('click', async () => {
   setStatus('Formatting…');
   formatPopover.classList.add('hidden');
+
+  // With word-level timing available, re-break locally: the optimizer uses
+  // the real pauses, and we keep Whisper's timings intact. (The server path
+  // flattens cues and re-estimates word timing proportionally.)
+  if (allWords.length) {
+    breakPositions = computeSmartBreaks(allWords, maxChars);
+    cues = flatModelToCues();
+    render();
+    const ratioNote = aspectRatio === 'custom' ? `${maxChars} chars/line` : `${aspectRatio}, ${maxChars} chars/line`;
+    toast(`Re-broke into ${cues.length} cues (${ratioNote}).`, 'success');
+    setStatus('Formatted.');
+    autoSaveSRT(true);
+    return;
+  }
+
   try {
     const res = await api('POST', '/api/format', { cues, maxChars, mode: autoFormatMode });
     if (res.error) { toast(res.error, 'error'); return; }
@@ -965,6 +1477,9 @@ setupPopover(btnAutoFormatToggle, formatPopover);
 setupPopover(btnOverflow, overflowMenu);
 
 document.addEventListener('click', (e) => {
+  // The speaker menu is built and torn down per paragraph, so it's removed
+  // outright rather than just hidden like the static popovers.
+  if (!e.target.closest('.speaker-menu, .para-reassign')) closeSpeakerMenu();
   const clickedMenuItem = !!e.target.closest('.menu-item');
   document.querySelectorAll('.popover').forEach(p => {
     if (clickedMenuItem || !p.contains(e.target)) p.classList.add('hidden');
@@ -978,12 +1493,7 @@ document.addEventListener('keydown', (e) => {
 
 // Download SRT (clean, grouped)
 btnSave.addEventListener('click', () => {
-  const blob = new Blob([serializeSRT(cues)], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = fileName;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  downloadBlob(serializeSRT(cues), fileName);
   toast('SRT downloaded.', 'success');
   setStatus(`Downloaded ${fileName}`);
 });
@@ -1048,14 +1558,16 @@ async function readFromResolve() {
         start: timeToMs(c.startTime) / 1000,
         end: timeToMs(c.endTime) / 1000,
         probability: null,  // from Resolve — no Whisper confidence
+        speaker: null,
         resolveId: c.resolveId || null,
       }));
-      breakPositions = computeInitialBreaks(allWords);
+      breakPositions = computeSmartBreaks(allWords, maxChars);
       cues = flatModelToCues();
       fileName = 'from-resolve.srt';
       fileNameDisplay.textContent = fileName;
       fileNameDisplay.classList.add('loaded');
       if (modelTag) modelTag.textContent = '';  // came from Resolve, not from Whisper
+      loadSpeakerNames();
       render();
       toast(`Read ${allWords.length} words from Resolve (word-level track ${res.trackUsed}).`, 'success', 5000);
       setStatus(`Loaded ${allWords.length} words from Resolve — ${cues.length} cues.`);
@@ -1117,12 +1629,7 @@ btnPushResolve.addEventListener('click', async () => {
     // No source path — trigger versioned download
     srtVersion++;
     const dlName = fileName.replace(/\.srt$/i, '') + `_v${srtVersion}.srt`;
-    const blob = new Blob([serializeSRT(cues)], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = dlName;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    downloadBlob(serializeSRT(cues), dlName);
     toast(`Downloaded ${dlName} — drag into Resolve.`, 'success', 5000);
   }
 });
@@ -1158,7 +1665,10 @@ btnTranscribe.addEventListener('click', async () => {
 
   try {
     const model = transcribeModel ? transcribeModel.value : null;
-    const res = await api('POST', '/api/transcribe', { filePath, model });
+    // Whisper is more verbatim on clean voiceover, but it cannot tell
+    // speakers apart — that's the whole reason to reach for Deepgram.
+    const engine = (transcribeDiarize && transcribeDiarize.checked) ? 'deepgram' : 'whisper';
+    const res = await api('POST', '/api/transcribe', { filePath, model, engine });
     if (res.error) {
       toast(res.error, 'error', 5000);
       setStatus('Transcription failed to start.');
@@ -1202,7 +1712,13 @@ async function pollTranscription() {
     // explicitly instead of misleadingly showing "Transcribing… 0%".
     const pct = Math.round((job.progress || 0) * 100);
     transcribeFill.style.width = pct + '%';
-    if ((job.segments_done || 0) === 0 && pct === 0) {
+    if (job.stage === 'extracting') {
+      setStatus('Extracting audio…');
+    } else if (job.stage === 'uploading') {
+      setStatus(`Uploading to Deepgram… ${pct}%`);
+    } else if (job.stage === 'processing') {
+      setStatus('Deepgram is transcribing…');
+    } else if ((job.segments_done || 0) === 0 && pct === 0) {
       setStatus('Loading model… (first run may download ~3 GB)');
     } else {
       setStatus(`Transcribing… ${pct}%`);
@@ -1212,13 +1728,27 @@ async function pollTranscription() {
       stopTranscriptionPolling();
 
       if (job.words && job.words.length) {
-        loadTranscriptionWords(job.words);
         fileName = (job.file || 'transcription').replace(/\.[^.]+$/, '') + '.srt';
+        loadSpeakerNames();
+        // Asked for speakers? Then the transcript document is what they came
+        // for — open on it rather than the caption editor.
+        if (job.speakers > 0) {
+          viewMode = 'transcript';
+          localStorage.setItem('viewMode', viewMode);
+        }
+        loadTranscriptionWords(job.words);
         fileNameDisplay.textContent = job.file || 'Transcription';
         fileNameDisplay.classList.add('loaded');
         if (modelTag) modelTag.textContent = job.model || '';
         const modelSuffix = job.model ? ` · ${job.model}` : '';
-        toast(`Transcribed ${job.words.length} words${modelSuffix}.`, 'success', 4000);
+        const speakerSuffix = job.speakers > 0
+          ? ` · ${job.speakers} speaker${job.speakers === 1 ? '' : 's'}`
+          : '';
+        toast(
+          `Transcribed ${job.words.length} words${modelSuffix}${speakerSuffix}.`,
+          'success', 4000,
+        );
+        syncViewTabs();
         setStatus(`Transcription complete — ${job.words.length} words, ${cues.length} cues${modelSuffix}.`);
 
         // Auto-save SRT next to source file if we have the path
@@ -1267,3 +1797,71 @@ function stopTranscriptionPolling() {
   btnTranscribe.disabled = false;
   btnTranscribe.textContent = 'Transcribe';
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// TRANSCRIPT VIEW — event wiring
+// ═══════════════════════════════════════════════════════════════════════
+
+function syncViewTabs() {
+  if (viewCaptionsBtn)   viewCaptionsBtn.classList.toggle('is-active', viewMode === 'captions');
+  if (viewTranscriptBtn) viewTranscriptBtn.classList.toggle('is-active', viewMode === 'transcript');
+}
+syncViewTabs();
+
+if (viewCaptionsBtn)   viewCaptionsBtn.addEventListener('click', () => setViewMode('captions'));
+if (viewTranscriptBtn) viewTranscriptBtn.addEventListener('click', () => setViewMode('transcript'));
+
+if (showTimestampsInput) {
+  showTimestampsInput.checked = showTimestamps;
+  showTimestampsInput.addEventListener('change', () => {
+    showTimestamps = showTimestampsInput.checked;
+    localStorage.setItem('showTimestamps', String(showTimestamps));
+    if (viewMode === 'transcript') render();
+  });
+}
+
+if (btnExportTxt) {
+  btnExportTxt.addEventListener('click', () => {
+    if (!allWords.length) { toast('Nothing to export yet.', 'warn'); return; }
+    // Flush any edit still sitting in the DOM before we serialise
+    reconcileTranscriptFromDOM();
+    const safeName = transcriptTitle().replace(/[\\/:*?"<>|]/g, '_') + '.txt';
+    downloadBlob(buildTranscriptText(), safeName);
+    toast('Transcript downloaded.', 'success');
+    setStatus(`Downloaded ${safeName}`);
+  });
+}
+
+// ── Deepgram availability ──────────────────────────────────────────────
+// The key lives in the server's environment, so the browser has to ask.
+// Better to grey the option out with a reason than to fail on click.
+function syncDiarizeUI() {
+  const on = !!(transcribeDiarize && transcribeDiarize.checked);
+  if (transcribeModel) {
+    transcribeModel.disabled = on;
+    transcribeModel.title = on
+      ? 'Speaker identification runs Deepgram Nova-3 — the Whisper model choice does not apply.'
+      : 'Whisper model — large-v2 is the most verbatim for English voiceover; v3 is sharper but paraphrases more.';
+  }
+}
+
+if (transcribeDiarize) {
+  transcribeDiarize.addEventListener('change', syncDiarizeUI);
+}
+
+(async function checkEngines() {
+  try {
+    const r = await api('GET', '/api/engines');
+    deepgramReady = !!r.deepgram;
+  } catch (e) {
+    deepgramReady = false;
+  }
+  if (transcribeDiarize && !deepgramReady) {
+    transcribeDiarize.checked = false;
+    transcribeDiarize.disabled = true;
+    const row = document.getElementById('diarize-row');
+    if (row) row.classList.add('is-disabled');
+    if (diarizeUnavailable) diarizeUnavailable.classList.remove('hidden');
+  }
+  syncDiarizeUI();
+})();

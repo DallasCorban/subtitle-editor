@@ -111,12 +111,27 @@ def flatten(text: str) -> str:
     return ' '.join(text.split())
 
 
+# Words a line shouldn't end on — articles, conjunctions, prepositions,
+# auxiliaries. Breaking after one splits a phrase mid-thought.
+WEAK_TAIL = {
+    'a', 'an', 'the', 'and', 'but', 'or', 'nor', 'of', 'to', 'in', 'on',
+    'at', 'by', 'for', 'with', 'from', 'as', 'into', 'onto', 'over',
+    'under', 'than', 'that', 'which', 'who', 'whose', 'whom', 'if', 'so',
+    'because', 'while', 'when', 'where', 'is', 'are', 'was', 'were', 'be',
+    'been', 'being', 'am', 'has', 'have', 'had', 'will', 'would', 'can',
+    'could', 'should', 'shall', 'may', 'might', 'must', 'not', 'very',
+    'their', 'his', 'her', 'its', 'my', 'your', 'our', 'this', 'these',
+    'those', 'each', 'every', 'some', 'any', 'no',
+}
+
+
 def smart_break(flat: str, max_chars: int) -> str:
     """
     Insert at most one line break in `flat` so neither line exceeds
-    `max_chars`.  Prefers breaks after punctuation and at roughly
-    equal line lengths.  Returns original text if it already fits
-    on one line or a valid two-line break cannot be found.
+    `max_chars`.  Prefers breaks after punctuation, avoids stranding
+    connective words at the end of line 1, and aims for roughly equal
+    line lengths.  Returns original text if it already fits on one
+    line or a valid two-line break cannot be found.
     """
     if len(flat) <= max_chars:
         return flat
@@ -134,7 +149,9 @@ def smart_break(flat: str, max_chars: int) -> str:
             length_diff = abs(len(current) - len(remaining))
             # Prefer breaking after sentence-ending punctuation
             punct_bonus = -6 if current[-1] in ',.!?;:' else 0
-            score = length_diff + punct_bonus
+            # Don't leave "the" / "and" / "to" dangling at the end of line 1
+            weak_penalty = 8 if word.lower().strip("'\".,!?;:") in WEAK_TAIL else 0
+            score = length_diff + punct_bonus + weak_penalty
             if score < best_score:
                 best_score = score
                 best_idx = i + 1
