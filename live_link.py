@@ -28,7 +28,9 @@ HISTORY_REVS = 60
 MAX_WAIT_S = 8
 
 TEXT_OPS = ('replace', 'set')
-ALL_OPS = TEXT_OPS + ('focus', 'speaker', 'undo')
+# 'review' brackets a review job's edits (start/end) so the tab can snapshot
+# for Undo all and run its style check afterwards. No text guard.
+ALL_OPS = TEXT_OPS + ('focus', 'speaker', 'undo', 'review')
 
 
 class LiveLink:
@@ -196,7 +198,8 @@ class LiveLink:
                     results.append({'ok': False, 'op': op, 'reason': f'unknown op {op!r}'})
                     continue
                 item = {'id': next(self._ids), 'op': op}
-                for k in ('cue', 'find', 'replace', 'text', 'speaker', 'name', 'flag', 'note'):
+                for k in ('cue', 'find', 'replace', 'text', 'speaker', 'name', 'flag', 'note',
+                          'phase', 'summary', 'job', 'count'):
                     if raw.get(k) is not None:
                         item[k] = raw[k]
                 if op in TEXT_OPS:

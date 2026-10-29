@@ -9,6 +9,7 @@ from flask import Flask, jsonify, render_template, request
 
 import deepgram_client
 import resolve_bridge
+import reviewer
 import transcriber
 from live_link import link as live
 from srt_parser import (
@@ -124,6 +125,9 @@ def load_srt():
         return jsonify({'error': str(e)}), 500
 
 
+_save_lock = threading.Lock()
+
+
 @app.route('/api/save-srt', methods=['POST'])
 def save_srt():
     data = request.get_json()
@@ -137,7 +141,10 @@ def save_srt():
     content = serialize_srt(cues)
 
     try:
-        with open(path, 'w', encoding='utf-8') as f:
+        # One write at a time. Two overlapping saves of the same file (a run
+        # of quick edits each auto-saves) could interleave, leaving the tail
+        # of the longer version after the shorter one.
+        with _save_lock, open(path, 'w', encoding='utf-8') as f:
             f.write(content)
         return jsonify({'success': True, 'filePath': path})
     except Exception as e:
@@ -263,9 +270,12 @@ def engines():
     Deepgram needs an API key in the environment; the UI uses this to explain
     why the speaker option is unavailable instead of failing at click time.
     """
+    review_ok, review_why = reviewer.availability()
     return jsonify({
         'whisper': True,
         'deepgram': deepgram_client.has_api_key(),
+        'review': review_ok,
+        'reviewReason': review_why,
     })
 
 
@@ -383,6 +393,63 @@ def live_flags_resolve():
 @app.route('/api/live/strip')
 def live_strip():
     return jsonify(live.strip())
+
+
+# ---------------------------------------------------------------------------
+# AI review (reviewer.py) — runs the local `claude` CLI on whatever is open in
+# the editor tab, then sends the checked swaps to the tab over the live link.
+# The Review button and the chat operator use the same endpoints.
+# ---------------------------------------------------------------------------
+
+def _start_review(work):
+    job_id = reviewer.start_job(work)
+    if job_id is None:
+        return jsonify({'error': 'A review is already running.'}), 409
+    return jsonify({'jobId': job_id})
+
+
+@app.route('/api/review', methods=['POST'])
+def review_start():
+    """Start a review of the open transcript. Body: {note?}. Returns {jobId}."""
+    body = request.get_json(silent=True) or {}
+    note = str(body.get('note') or '').strip()
+    ok, why = reviewer.availability()
+    if not ok:
+        return jsonify({'error': why}), 400
+    if not live.is_open():
+        return jsonify({'error': live.closed_reply()['reason']}), 400
+    return _start_review(lambda job: reviewer.run_live_review(job, live, note))
+
+
+@app.route('/api/review/apply', methods=['POST'])
+def review_apply():
+    """Apply swaps an operator worked out itself, with the same checks.
+
+    Body: {edits: [{from_index, to_index, original, replacement, reason}],
+    summary?}. Word numbers are those in GET /api/review/transcript.
+    """
+    body = request.get_json(silent=True) or {}
+    edits = body.get('edits')
+    if not isinstance(edits, list):
+        return jsonify({'error': 'edits must be a list'}), 400
+    summary = str(body.get('summary') or '').strip()
+    return _start_review(lambda job: reviewer.run_live_review(job, live, summary, supplied=edits))
+
+
+@app.route('/api/review/status')
+def review_status():
+    """Poll a review. ?jobId= (or none for the latest)."""
+    job_id = request.args.get('jobId', '')
+    job = reviewer.get_job(job_id) if job_id else reviewer.latest_job()
+    if job is None:
+        return jsonify({'error': 'Review not found.'}), 404
+    return jsonify(job)
+
+
+@app.route('/api/review/transcript')
+def review_transcript():
+    """The open transcript numbered exactly as the reviewer sees it."""
+    return jsonify(reviewer.numbered_transcript(live))
 
 
 # ---------------------------------------------------------------------------

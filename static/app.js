@@ -390,6 +390,7 @@ function render() {
   btnAutoFormat.disabled       = !cues.length;
   btnReadResolve.disabled      = !resolveOk;
   btnPushResolve.disabled      = !cues.length;
+  reviewSyncButton();
 
   if (!allWords.length) {
     cueCountEl.textContent = '';
@@ -1774,8 +1775,19 @@ async function pollTranscription() {
   }
 }
 
+// One save in flight at a time. A burst of edits (a review applies several)
+// would otherwise race, and an older save landing last could win; instead
+// a save asked for mid-flight runs once more afterwards, with the latest cues.
+let autoSaveBusy = false;
+let autoSaveAgain = null;   // null, or the quiet flag for the follow-up save
+
 async function autoSaveSRT(quiet = false) {
   if (!cues.length || !sourceFilePath) return;
+  if (autoSaveBusy) {
+    autoSaveAgain = autoSaveAgain === null ? quiet : (autoSaveAgain && quiet);
+    return;
+  }
+  autoSaveBusy = true;
   // Save SRT next to the source file (replace extension with .srt)
   const srtPath = sourceFilePath.replace(/\.[^.]+$/, '') + '.srt';
   try {
@@ -1787,6 +1799,14 @@ async function autoSaveSRT(quiet = false) {
       setStatus(`Saved → ${srtPath}`);
     }
   } catch (e) { /* silent */ }
+  finally {
+    autoSaveBusy = false;
+    if (autoSaveAgain !== null) {
+      const q = autoSaveAgain;
+      autoSaveAgain = null;
+      autoSaveSRT(q);
+    }
+  }
 }
 
 function stopTranscriptionPolling() {
@@ -1952,7 +1972,7 @@ function livePublish() {
         .filter(k => k >= 0),
     })),
   };
-  api('POST', '/api/live/doc', doc).catch(() => {});
+  return api('POST', '/api/live/doc', doc).catch(() => {});
 }
 
 // Called at the end of every render(): the model may have changed.
@@ -2055,9 +2075,27 @@ function liveApplyCueTokens(r, tokens, note = null) {
   const merged = reconcileWords(allWords.slice(lo, hi), [...before, ...tokens, ...after]);
   const slice = merged.slice(before.length, merged.length - after.length);
   if (note) {
-    // Only the words that actually changed carry the note.
+    // Only the words that actually changed carry the note. The line before
+    // and after rides along so a review change can be reverted on its own.
     const old = new Set(allWords.slice(r.s, r.e).map(w => w.word));
-    slice.forEach(w => { if (!old.has(w.word)) w.liveNote = note; });
+    const was = allWords.slice(r.s, r.e).map(w => w.word).join(' ');
+    const now = tokens.join(' ');
+    slice.forEach(w => {
+      if (!old.has(w.word)) { w.liveNote = note; w.liveWas = was; w.liveNow = now; }
+    });
+  }
+  // A text fix never moves the caption itself: if the line's first or last
+  // word was merged away ("Net flicks" -> "Netflix"), the survivor takes over
+  // its edge time, so the SRT still lines up with the version in Resolve.
+  const first = allWords[r.s], last = allWords[r.e - 1];
+  if (slice.length && typeof first.start === 'number'
+      && !(typeof slice[0].start === 'number' && slice[0].start <= first.start)) {
+    slice[0].start = first.start;
+  }
+  const tail = slice[slice.length - 1];
+  if (tail && typeof last.end === 'number'
+      && !(typeof tail.end === 'number' && tail.end >= last.end)) {
+    tail.end = last.end;
   }
 
   const delta = tokens.length - (r.e - r.s);
@@ -2174,7 +2212,12 @@ function liveApply(op) {
     if (op.op === 'focus') return liveApplyFocus(op);
     if (!allWords.length) return { ok: false, reason: 'no transcript open' };
     liveFlushTyping();
-    if (op.op === 'replace' || op.op === 'set') return liveApplyText(op);
+    if (op.op === 'review') return reviewLiveOp(op);
+    if (op.op === 'replace' || op.op === 'set') {
+      const res = liveApplyText(op);
+      if (res.ok && op.count && review.active) review.made += op.count;
+      return res;
+    }
     if (op.op === 'speaker') return liveApplySpeaker(op);
     if (op.op === 'undo') return liveUndoLast();
     return { ok: false, reason: `unknown op ${op.op}` };
@@ -2248,3 +2291,254 @@ window.addEventListener('pagehide', () => {
 
 setInterval(livePoll, LIVE_POLL_MS);
 livePublish();
+
+// ═══════════════════════════════════════════════════════════════════════
+// AI REVIEW — Claude on this computer fixes words the transcriber misheard
+// (server side: reviewer.py). The Review button and a chat operator start
+// the same job; its swaps arrive over the live link as whole-line edits,
+// bracketed by {op:'review', phase:'start'|'end'}. At the start this tab
+// snapshots for Undo all; at the end it runs the house style check
+// (static/review_style.js: no em dashes, Australian spelling).
+// ═══════════════════════════════════════════════════════════════════════
+
+var review = {
+  ready: false,       // claude CLI found on this machine
+  reason: '',         // why not, for the greyed-out button
+  jobId: null,        // job this tab started (chat-started jobs aren't polled)
+  pollTimer: null,
+  active: false,      // between the start and end ops
+  job: null,
+  snap: null,         // the model before the review, for Undo all
+  undoLen: 0,
+  made: 0,
+  endSig: null,       // the model right after the review
+};
+
+const btnReview       = document.getElementById('btn-review');
+const reviewPopover   = document.getElementById('review-popover');
+const reviewNoteInput = document.getElementById('review-note');
+const btnReviewStart  = document.getElementById('btn-review-start');
+
+function reviewNoteKey() { return `reviewNote:${fileName}`; }
+
+function reviewSyncButton() {
+  if (typeof review === 'undefined' || !btnReview) return;  // render() before this ran
+  const running = !!review.jobId;
+  btnReview.disabled = !allWords.length || !review.ready || !!transcribeJobId || running;
+  btnReview.textContent = running ? 'Reviewing…' : 'Review';
+  btnReview.title = !review.ready
+    ? (review.reason || 'Review is unavailable.')
+    : 'Have Claude fix words the transcriber misheard';
+}
+
+function toastAction(msg, label, onClick, type = 'success', dur = 15000) {
+  const t = document.createElement('div');
+  t.className = `toast ${type} toast-action`;
+  const text = document.createElement('span');
+  text.textContent = msg;
+  const btn = document.createElement('button');
+  btn.className = 'btn-ghost toast-btn';
+  btn.textContent = label;
+  btn.addEventListener('click', () => { t.remove(); onClick(); });
+  t.append(text, btn);
+  toastContainer.appendChild(t);
+  setTimeout(() => t.remove(), dur);
+}
+
+function reviewLiveOp(op) {
+  if (op.phase === 'start') {
+    review.active = true;
+    review.job = op.job || null;
+    review.snap = liveSnapshot();
+    review.undoLen = live.undo.length;
+    review.made = 0;
+    return { ok: true };
+  }
+  if (op.phase !== 'end') return { ok: false, reason: `unknown review phase ${op.phase}` };
+
+  const made = review.made;
+  const style = reviewStyleCheck();
+  review.active = false;
+  review.endSig = liveModelSig();
+  const changed = made + style.fixed;
+  const bits = [`Review made ${made} change${made === 1 ? '' : 's'}`];
+  if (style.fixed) bits.push(`${style.fixed} style fix${style.fixed === 1 ? '' : 'es'}`);
+  if (style.flags) bits.push(`${style.flags} to check`);
+  if (changed && review.snap) {
+    toastAction(bits.join(' · '), 'Undo all', reviewUndoAll);
+  } else {
+    review.snap = null;
+    toast(style.flags ? bits.join(' · ') : 'Review found nothing to change.', 'success', 5000);
+  }
+  setStatus(op.summary ? `Reviewed: ${op.summary}` : 'Review complete.');
+  return { ok: true, text: `${made} review, ${style.fixed} style, ${style.flags} flagged` };
+}
+
+// Em dashes and Australian spelling over the whole transcript, plus captions
+// the review pushed over the line limit. Fixes go in like any other live
+// edit (green, revertable); anything unclear becomes a flag.
+function reviewStyleCheck() {
+  if (typeof ReviewStyle === 'undefined') return { fixed: 0, flags: 0 };
+  const lines = () => liveCueRanges().map((r, i) => ({ n: i + 1, text: liveCueText(r) }));
+  // Before the dictionaries load nothing reads as a US spelling, but the
+  // dash rule still runs.
+  const au = spellDicts ? (w => spellDicts[0].check(w)) : (() => true);
+  const us = spellDicts ? (w => spellDicts[1].check(w)) : (() => false);
+  const result = ReviewStyle.check(lines(), au, us);
+  let fixed = 0;
+  for (const line of result.lines) {
+    const res = liveApplyText({ op: 'set', cue: line.cue, text: line.text, note: line.note });
+    if (res.ok) fixed += line.count;
+  }
+  const limit = autoFormatMode === 'two_line' ? maxChars * 2 : maxChars;
+  const flags = [...result.flags, ...ReviewStyle.overLength(lines(), limit)];
+  // A new review's flags replace the last review's.
+  api('POST', '/api/live/flags', { flags, replace: true }).catch(() => {});
+  return { fixed, flags: flags.length };
+}
+
+function reviewUndoAll() {
+  if (!review.snap) return;
+  if (liveModelSig() !== review.endSig) {
+    toast('The transcript has changed since the review, so Undo all would lose that. '
+      + 'Click a green word to revert it on its own.', 'warn', 7000);
+    return;
+  }
+  allWords = review.snap.words;
+  breakPositions = review.snap.breaks;
+  speakerNames = review.snap.names;
+  saveSpeakerNames();
+  live.undo.length = Math.min(live.undo.length, review.undoLen);
+  review.snap = null;
+  api('POST', '/api/live/flags', { flags: [], replace: true }).catch(() => {});
+  liveRerender();
+  toast('Review undone.', 'success', 2500);
+}
+
+// Click a green (review-changed) word: what it was, why, and Revert.
+let reviewPop = null;
+function closeReviewPop() { if (reviewPop) { reviewPop.remove(); reviewPop = null; } }
+
+container.addEventListener('click', (e) => {
+  const span = e.target.closest && e.target.closest('.word.live-noted');
+  closeReviewPop();
+  if (!span) return;
+  const idx = Number(span.dataset.idx);
+  const w = allWords[idx];
+  if (!w || w.liveWas == null) return;
+  reviewPop = document.createElement('div');
+  reviewPop.className = 'review-pop';
+  const note = document.createElement('div');
+  note.className = 'review-pop-note';
+  note.textContent = String(w.liveNote || '').replace(/ \(was: .*\)$/, '');
+  const was = document.createElement('div');
+  was.className = 'review-pop-was';
+  was.textContent = `Was: ${w.liveWas}`;
+  const btn = document.createElement('button');
+  btn.className = 'btn-ghost';
+  btn.textContent = 'Revert';
+  btn.addEventListener('click', (ev) => { ev.stopPropagation(); reviewRevert(idx); });
+  reviewPop.append(note, was, btn);
+  document.body.appendChild(reviewPop);
+  const box = span.getBoundingClientRect();
+  reviewPop.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - 340))}px`;
+  reviewPop.style.top = `${box.bottom + 6}px`;
+});
+document.addEventListener('keydown', closeReviewPop);
+window.addEventListener('scroll', closeReviewPop, true);
+
+function reviewRevert(idx) {
+  closeReviewPop();
+  const w = allWords[idx];
+  if (!w || w.liveWas == null) return;
+  const n = liveCueOfWord(idx);
+  const r = liveCueRanges()[n - 1];
+  if (!r || liveCueText(r) !== w.liveNow) {
+    toast('That line has been edited since, so change it by hand.', 'warn', 5000);
+    return;
+  }
+  const res = liveApplyText({ op: 'set', cue: n, text: w.liveWas });
+  if (!res.ok) { toast(res.reason || 'Could not revert.', 'warn'); return; }
+  const r2 = liveCueRanges()[n - 1];
+  for (let i = r2.s; i < r2.e; i++) {
+    delete allWords[i].liveNote; delete allWords[i].liveWas; delete allWords[i].liveNow;
+  }
+  review.endSig = null;   // the post-review state no longer exists
+  render();
+  toast('Reverted.', 'success', 1500);
+}
+
+// ── The Review button ──────────────────────────────────────────────────
+if (btnReview) {
+  setupPopover(btnReview, reviewPopover);
+  btnReview.addEventListener('click', () => {
+    reviewNoteInput.value = localStorage.getItem(reviewNoteKey()) || '';
+    setTimeout(() => reviewNoteInput.focus(), 0);
+  });
+  reviewNoteInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); btnReviewStart.click(); }
+  });
+  btnReviewStart.addEventListener('click', startReview);
+}
+
+async function startReview() {
+  const note = reviewNoteInput.value.trim();
+  try {
+    if (note) localStorage.setItem(reviewNoteKey(), note);
+    else localStorage.removeItem(reviewNoteKey());
+  } catch (e) { /* storage blocked: the note still goes with this review */ }
+  reviewPopover.classList.add('hidden');
+  // The server reviews what this tab last published, so publish now.
+  liveFlushTyping();
+  if (live.publishTimer) clearTimeout(live.publishTimer);
+  await livePublish();
+  let res;
+  try {
+    res = await api('POST', '/api/review', { note });
+  } catch (e) {
+    toast('Could not start the review.', 'error');
+    return;
+  }
+  if (res.error) { toast(res.error, 'error', 6000); return; }
+  review.jobId = res.jobId;
+  reviewSyncButton();
+  setStatus('Starting Claude…');
+  review.pollTimer = setInterval(pollReview, 1500);
+}
+
+async function pollReview() {
+  if (!review.jobId) return;
+  let job;
+  try {
+    job = await api('GET', `/api/review/status?jobId=${review.jobId}`);
+  } catch (e) { return; }   // network blip: try again
+  if (job.status === 'running') {
+    setStatus(`${job.stage || 'Reviewing'}…`);
+    return;
+  }
+  clearInterval(review.pollTimer);
+  review.pollTimer = null;
+  review.jobId = null;
+  reviewSyncButton();
+  if (job.status === 'error' || job.error) {
+    toast(job.error || 'Review failed.', 'error', 8000);
+    setStatus('Review failed.');
+    return;
+  }
+  // The edits themselves already arrived over the live link.
+  if (job.skipped && job.skipped.length) {
+    toast(`${job.skipped.length} line${job.skipped.length === 1 ? ' was' : 's were'} skipped `
+      + 'because you edited them during the review.', 'warn', 6000);
+  }
+}
+
+(async function checkReview() {
+  try {
+    const r = await api('GET', '/api/engines');
+    review.ready = !!r.review;
+    review.reason = r.reviewReason || '';
+  } catch (e) {
+    review.ready = false;
+  }
+  reviewSyncButton();
+})();

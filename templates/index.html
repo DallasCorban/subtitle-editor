@@ -28,6 +28,18 @@
 
   <div class="topbar-actions" data-when="loaded">
     <div class="action-group">
+      <button id="btn-review" class="btn-ghost" disabled title="Have Claude fix words the transcriber misheard">Review</button>
+      <div id="review-popover" class="popover review-popover hidden">
+        <label class="setting-row">
+          <span>What's this video about? <span class="setting-unit">optional</span></span>
+          <input id="review-note" type="text" placeholder="e.g. media subscriptions in Australia" autocomplete="off">
+        </label>
+        <p class="review-hint">Claude fixes misheard words straight into the captions. Each change is underlined green: click it to see what it was and revert it. Timing doesn't move.</p>
+        <button id="btn-review-start" class="btn-primary">Review transcript</button>
+      </div>
+    </div>
+
+    <div class="action-group">
       <button id="btn-auto-format-toggle" class="btn-ghost" disabled>Auto-format</button>
       <div id="format-popover" class="popover hidden">
         <label class="setting-row" title="Hold each cue through silences up to this length (in seconds) so the caption doesn't briefly disappear between words.">
@@ -190,6 +202,7 @@
 </div>
 
 <script src="/static/vendor/typo.js"></script>
-<script src="/static/app.js?v=30"></script>
+<script src="/static/review_style.js?v=1"></script>
+<script src="/static/app.js?v=31"></script>
 </body>
 </html>

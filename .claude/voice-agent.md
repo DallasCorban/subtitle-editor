@@ -61,14 +61,26 @@ Read the transcript, find words, show a line, make one-word or one-line fixes af
 yes, rename speakers, undo. Anything that changes more than one line at once ("replace every
 esquad") you ask about first, in one question, saying how many lines it touches.
 
+## The AI review
+A full review of the transcript is built into the app, so you start it yourself:
+`POST /api/review {"note": "<what Ben said the video is about, if anything>"}` returns a
+`jobId`; poll `GET /api/review/status?jobId=<id>` every few seconds (it takes seconds to a
+minute). It's the same as Ben pressing Review: Claude on this computer fixes misheard words
+**straight into the captions** (Ben chose that), each change underlined green with Undo all in
+the editor, then a check fixes em dashes and US spellings. Only unclear things (licence or
+license, a caption now too long) become flags. When it's done, `changes` lists each
+`was`, `now` and `reason`: tell Ben how many it made and offer to read them. "Put esquad back"
+is a normal edit (`POST /api/live/edits {"cue", "find": "SVOD", "replace": "esquad"}`), then
+offer the flags. If you'd rather decide the swaps yourself, read `GET /api/review/transcript`
+(numbered words) and post them to `POST /api/review/apply {"edits": [{"from_index",
+"to_index", "original", "replacement": [...], "reason"}]}`: same checks, same green highlights.
+One review at a time; a second one answers 409.
+
 ## What you hand off as a job
-A full AI review pass over the whole transcript, re-transcribing, or bulk reformatting goes out
-as a job in this project with dispatch. Give the job everything it needs: which file is open,
-what Ben wants, and anything he said about the video. A review job posts its suggestions to
-the live link as flags (`POST /api/live/flags`), not as edits, so you can walk Ben through them.
-Confirm in one line ("On it, I'll flag anything odd") and keep talking. When it finishes while
-you're on the call, tell him yourself how many flags it found and offer to go through them.
-Run one review or transcription at a time, since transcription is heavy on the machine.
+Re-transcribing or bulk reformatting goes out as a job in this project with dispatch. Give the
+job everything it needs: which file is open, what Ben wants, and anything he said about the
+video. Confirm in one line and keep talking. Run one transcription at a time, since it's heavy
+on the machine.
 
 ## Ben's style rules for any text you put in
 Australian English spelling (colour, organise, centre). No em dashes, ever: use a

@@ -82,6 +82,48 @@ export DEEPGRAM_API_KEY="your-key-here"      # macOS / Linux
 
 Without a key the option is greyed out and everything else works as before.
 
+## AI review: fixing misheard words
+
+**Review** in the top bar has Claude fix words the transcriber misheard
+("esquad" → "SVOD") using the context of the whole transcript and an optional
+one-line note about what the video is about (remembered per file).
+
+- It runs the **Claude Code** command already installed on this computer, in
+  the background, signed in with your normal Claude login. No API key; it
+  comes out of your Claude plan's usage. It runs in an empty temp folder with
+  no tools, MCP servers or hooks, so it only reads the text it's given. If
+  `claude` isn't installed the button is greyed out and says why.
+- Fixes go **straight into the captions**, each underlined green. Hover for
+  the reason; click for what it was and **Revert**. The toast after a review
+  has **Undo all**.
+- Claude answers with word swaps, never rewritten text, and the server checks
+  every swap (right words at the right positions, inside one caption, not much
+  longer than the original, never the `[.]` anchor) before it's applied.
+- **Caption timing doesn't move** and no caption is added or removed, so the
+  new SRT still lines up with the version already in Resolve.
+- Afterwards a fixed check enforces the house style over the whole
+  transcript: **no em dashes** (a comma instead) and **Australian spelling**
+  (color → colour, organize → organise, center → centre). It only changes a
+  word when the Australian dictionary accepts the result; unclear ones
+  (licence or license, metre or meter) and captions now over the line limit
+  are flagged with a violet dotted underline instead.
+- `SUBTITLE_REVIEW_MODEL=opus` uses Opus instead of the default Sonnet.
+
+Still check the green words: with an unfamiliar topic Claude will sometimes
+"fix" an unusual but correct word into a plausible wrong one.
+
+For an operator in chat (or a voice call), the same review is available over
+HTTP on the app's port (5000, or `PORT`):
+
+| | |
+|---|---|
+| `POST /api/review {note?}` | start a review of the open transcript → `{jobId}` |
+| `GET /api/review/status?jobId=` | progress, then `summary`, `changes` (`was`, `now`, `reason`), `rejected`, `skipped` |
+| `GET /api/review/transcript` | the open transcript numbered exactly as Claude sees it |
+| `POST /api/review/apply {edits, summary?}` | apply swaps you worked out yourself, with the same checks and highlights |
+
+Tests: `py -m unittest discover tests` and `node tests/test_review_style.js`.
+
 ## DaVinci Resolve integration
 
 Optional. The app talks to a locally-running Resolve via Blackmagic's
