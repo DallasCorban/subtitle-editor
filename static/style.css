@@ -1180,3 +1180,34 @@ body:not(.view-transcript) #timestamp-toggle {
   padding: 1px 5px;
 }
 .landing-note.hidden { display: none; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   LIVE LINK — fixes made by voice / review, flags, the line being discussed
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* A fix that just landed flashes green, then settles. */
+.word.live-fixed {
+  animation: live-fixed-flash 2.6s ease-out;
+}
+@keyframes live-fixed-flash {
+  0%, 40% { background: rgba(92, 196, 120, .38); box-shadow: 0 0 0 2px rgba(92, 196, 120, .38); }
+  100%    { background: transparent; box-shadow: none; }
+}
+
+/* A review suggestion still waiting for Ben's yes or no. Dotted violet so it
+   never reads as the transcriber's amber or the spell checker's red. */
+.script-flow .word.live-flag,
+.transcript-doc .word.live-flag {
+  text-decoration: underline dotted rgba(167, 139, 250, .95);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 4px;
+  text-decoration-skip-ink: none;
+}
+
+/* The line the call is talking about. */
+.word.live-shown {
+  background: rgba(122, 162, 255, .14);
+}
+
+/* A fix that carries a note: hover shows the reason. */
+.word.live-noted { cursor: help; }

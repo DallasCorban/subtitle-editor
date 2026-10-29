@@ -131,3 +131,24 @@ You can override defaults via env vars before launching:
 `ffmpeg` is needed by mlx-whisper to decode non-WAV inputs (mp4,
 mov, etc.). The setup script installs `imageio-ffmpeg`, which
 bundles a static ffmpeg — you don't need to install it via Homebrew.
+
+## Talking to it: the live link and "hey Subtitle"
+
+The editor tab and the local server share a **live link**, so a voice call
+(the Subtitle voice agent in Claude HQ) or a review job can read and fix the
+transcript you have open without fighting the tab's auto-save:
+
+- The tab publishes the open document to `/api/live/doc` on every change and
+  polls the server for queued edits about once a second.
+- Edits (`POST /api/live/edits`) are applied **in the tab**, through the same
+  path as your typing: timing and speakers are kept, the fix flashes green,
+  and **Ctrl+Z** undoes it. The file auto-saves as usual.
+- Each edit carries the line text the caller read. If you've changed that
+  line since, the edit is rejected, so your typing always wins.
+- Review suggestions posted to `/api/live/flags` show as violet dotted
+  underlines; hover for the suggestion.
+- `/api/live/strip` is a one-line summary Claude HQ shows during a call.
+
+Everything is in memory and localhost-only. With no editor tab open, every
+`/api/live/*` read answers `{"open": false}`. The routes are documented for
+the call in `.claude/voice-agent.md`; the server side is `live_link.py`.

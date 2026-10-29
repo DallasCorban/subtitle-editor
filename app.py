@@ -10,6 +10,7 @@ from flask import Flask, jsonify, render_template, request
 import deepgram_client
 import resolve_bridge
 import transcriber
+from live_link import link as live
 from srt_parser import (
     SubtitleCue,
     format_cues_split,
@@ -280,6 +281,108 @@ def transcribe_status():
         return jsonify({'error': 'Job not found.'}), 404
 
     return jsonify(job)
+
+
+# ---------------------------------------------------------------------------
+# Live link — the open editor tab <-> voice call / review jobs (live_link.py)
+# ---------------------------------------------------------------------------
+
+def _int_arg(name):
+    v = request.args.get(name)
+    try:
+        return int(v) if v not in (None, '') else None
+    except ValueError:
+        return None
+
+
+def _wait_arg(body):
+    try:
+        return float(body.get('wait', 4))
+    except (TypeError, ValueError):
+        return 4.0
+
+
+@app.route('/api/live/doc', methods=['GET', 'POST'])
+def live_doc():
+    if request.method == 'POST':
+        live.publish(request.get_json(silent=True) or {})
+        return jsonify({'ok': True})
+    return jsonify(live.doc(_int_arg('from'), _int_arg('to'), _int_arg('around')))
+
+
+@app.route('/api/live/close', methods=['POST'])
+def live_close():
+    # Sent with navigator.sendBeacon on unload, so the body arrives as text.
+    body = request.get_json(force=True, silent=True) or {}
+    live.close(str(body.get('tab') or ''))
+    return jsonify({'ok': True})
+
+
+@app.route('/api/live/poll')
+def live_poll():
+    return jsonify(live.poll(request.args.get('tab', ''), _int_arg('fv')))
+
+
+@app.route('/api/live/results', methods=['POST'])
+def live_results():
+    body = request.get_json(silent=True) or {}
+    live.report(str(body.get('tab') or ''), body.get('results'))
+    return jsonify({'ok': True})
+
+
+@app.route('/api/live/find')
+def live_find():
+    return jsonify(live.find(request.args.get('q', '')))
+
+
+@app.route('/api/live/edits', methods=['POST'])
+def live_edits():
+    body = request.get_json(silent=True) or {}
+    edits = body.get('edits')
+    if edits is None:
+        edits = [body]  # a single edit posted bare
+    return jsonify(live.submit(edits, body.get('rev'), _wait_arg(body)))
+
+
+@app.route('/api/live/focus', methods=['POST'])
+def live_focus():
+    body = request.get_json(silent=True) or {}
+    return jsonify(live.submit([{'op': 'focus', 'cue': body.get('cue')}], wait=_wait_arg(body)))
+
+
+@app.route('/api/live/speaker', methods=['POST'])
+def live_speaker():
+    body = request.get_json(silent=True) or {}
+    return jsonify(live.submit(
+        [{'op': 'speaker', 'speaker': body.get('speaker'), 'name': body.get('name')}],
+        wait=_wait_arg(body),
+    ))
+
+
+@app.route('/api/live/undo', methods=['POST'])
+def live_undo():
+    body = request.get_json(silent=True) or {}
+    return jsonify(live.submit([{'op': 'undo'}], wait=_wait_arg(body)))
+
+
+@app.route('/api/live/flags', methods=['GET', 'POST'])
+def live_flags():
+    if request.method == 'POST':
+        body = request.get_json(silent=True) or {}
+        return jsonify(live.set_flags(body.get('flags'), replace=body.get('replace', True) is not False))
+    return jsonify(live.flags(include_all=request.args.get('all') == '1'))
+
+
+@app.route('/api/live/flags/resolve', methods=['POST'])
+def live_flags_resolve():
+    body = request.get_json(silent=True) or {}
+    res = live.resolve_flag(body.get('id') or 0, str(body.get('status') or ''))
+    return jsonify(res), (400 if 'error' in res else 200)
+
+
+@app.route('/api/live/strip')
+def live_strip():
+    return jsonify(live.strip())
 
 
 # ---------------------------------------------------------------------------

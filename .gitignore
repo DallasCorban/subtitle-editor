@@ -6,7 +6,9 @@ dist/
 build/
 
 # Local tooling & runtime artifacts (machine-specific, never shared)
-.claude/
+.claude/*
+# ...except the voice call prompt Claude HQ reads when Ben says "hey Subtitle"
+!.claude/voice-agent.md
 *.log
 
 # Python virtualenv

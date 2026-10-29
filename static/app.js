@@ -393,6 +393,7 @@ function render() {
 
   if (!allWords.length) {
     cueCountEl.textContent = '';
+    liveAfterRender();
     return;
   }
 
@@ -402,6 +403,7 @@ function render() {
     cueCountEl.textContent = cues.length ? `${cues.length} cues` : '';
     renderCaptionView();
   }
+  liveAfterRender();
 }
 
 function renderCaptionView() {
@@ -1865,3 +1867,384 @@ if (transcribeDiarize) {
   }
   syncDiarizeUI();
 })();
+
+// ═══════════════════════════════════════════════════════════════════════
+// LIVE LINK — lets a voice call (Claude HQ's Subtitle agent) or a review
+// job read and fix the open transcript (server side: live_link.py)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// The open document only exists in this tab, so the server can't edit the
+// SRT on disk without fighting the auto-save. Instead this tab publishes a
+// compact copy of the document on every change, polls for queued edits, and
+// applies each one through reconcileWords() — the same model path typing
+// uses — so timing, speakers and auto-save behave exactly as for a keystroke.
+// Every text edit carries the line text the caller read; if Ben has changed
+// that line since, the edit is rejected. The keyboard always wins.
+
+// `var`, not `let`: render() can run before this section has executed.
+var live = {
+  tab: Math.random().toString(36).slice(2, 10),
+  rev: 0,
+  publishTimer: null,
+  focusCue: null,      // the line Ben's caret is on (or the call last showed)
+  shownCue: null,      // the line the call asked to show, outlined
+  flags: [],
+  flagsVersion: null,
+  undo: [],            // [{ words, breaks, names, sig }] — voice edits only
+  fixed: null,         // word indices to flash after the next render
+  polling: false,
+};
+const LIVE_POLL_MS = 700;
+const LIVE_PUBLISH_MS = 250;
+const LIVE_UNDO_MAX = 50;
+
+// Word-index ranges of each caption, matching flatModelToCues() one for one.
+function liveCueRanges() {
+  const cuts = [0, ...breakPositions, allWords.length];
+  const out = [];
+  for (let i = 0; i < cuts.length - 1; i++) {
+    if (cuts[i + 1] > cuts[i]) out.push({ s: cuts[i], e: cuts[i + 1] });
+  }
+  return out;
+}
+
+function liveCueOfWord(idx) {
+  let n = 1;
+  for (const b of breakPositions) { if (idx >= b) n++; else break; }
+  return n;
+}
+
+function liveCueText(r) {
+  return allWords.slice(r.s, r.e).map(w => w.word).join(' ');
+}
+
+function liveModelSig() {
+  return allWords.map(w => w.word).join(' ') + '|' + breakPositions.join(',');
+}
+
+function livePublishSoon() {
+  if (live.publishTimer) clearTimeout(live.publishTimer);
+  live.publishTimer = setTimeout(livePublish, LIVE_PUBLISH_MS);
+}
+
+function livePublish() {
+  live.publishTimer = null;
+  const ranges = liveCueRanges();
+  const doc = {
+    tab: live.tab,
+    rev: live.rev,
+    file: allWords.length ? fileName : '',
+    path: sourceFilePath || '',
+    view: viewMode,
+    focusCue: live.focusCue,
+    speakers: allWords.length
+      ? speakerIds().map(id => ({ id, name: speakerLabel(id) }))
+      : [],
+    cues: ranges.map((r, i) => ({
+      n: i + 1,
+      start: cues[i] ? cues[i].startTime : '',
+      end: cues[i] ? cues[i].endTime : '',
+      text: liveCueText(r),
+      // 0-based word offsets the transcriber itself was unsure of — strong
+      // hints for a reviewer. Absent for SRT loads (no probabilities).
+      unsure: allWords.slice(r.s, r.e)
+        .map((w, k) => (typeof w.probability === 'number' && w.probability < LOW_CONFIDENCE_THRESHOLD ? k : -1))
+        .filter(k => k >= 0),
+    })),
+  };
+  api('POST', '/api/live/doc', doc).catch(() => {});
+}
+
+// Called at the end of every render(): the model may have changed.
+function liveAfterRender() {
+  if (typeof live === 'undefined') return;  // render() before this section ran
+  live.rev++;
+  livePublishSoon();
+  liveDecorate();
+}
+
+// Flag underlines, the outlined "this line" the call is on, and the flash
+// on a fix that just landed. Re-applied after every render.
+function liveDecorate() {
+  const ranges = liveCueRanges();
+  const spanAt = idx => container.querySelector(`.word[data-idx="${idx}"]`);
+  const bare = w => _bareWord(w).toLowerCase();
+
+  for (const f of live.flags) {
+    const r = ranges[f.cue - 1];
+    if (!r) continue;
+    const want = bare(f.word);
+    for (let i = r.s; i < r.e; i++) {
+      if (bare(allWords[i].word) === want) {
+        const span = spanAt(i);
+        if (span) {
+          span.classList.add('live-flag');
+          span.title = f.suggestion
+            ? `Suggested: ${f.suggestion}${f.why ? ' — ' + f.why : ''}`
+            : (f.why || 'Flagged for review');
+        }
+        break;
+      }
+    }
+  }
+
+  // A fix that came with a note (a review's reason) keeps it on hover.
+  container.querySelectorAll('.word[data-idx]').forEach(span => {
+    const w = allWords[Number(span.dataset.idx)];
+    if (w && w.liveNote) { span.classList.add('live-noted'); span.title = w.liveNote; }
+  });
+
+  if (live.shownCue && ranges[live.shownCue - 1]) {
+    const r = ranges[live.shownCue - 1];
+    for (let i = r.s; i < r.e; i++) {
+      const span = spanAt(i);
+      if (span) span.classList.add('live-shown');
+    }
+  }
+
+  if (live.fixed) {
+    const idxs = live.fixed;
+    live.fixed = null;
+    const spans = [];
+    for (const i of idxs) {
+      const span = spanAt(i);
+      if (span) { span.classList.add('live-fixed'); spans.push(span); }
+    }
+    if (spans[0]) spans[0].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    setTimeout(() => spans.forEach(sp => sp.classList.remove('live-fixed')), 2600);
+  }
+}
+
+// Any typing the tab hasn't folded into the model yet goes in first, so an
+// edit is checked against what's really on screen and never re-renders it away.
+function liveFlushTyping() {
+  if (reconcileTimer) {
+    clearTimeout(reconcileTimer);
+    reconcileFromDOM();
+  }
+  const active = document.activeElement;
+  if (active && active.classList && active.classList.contains('para-body')) {
+    reconcileTranscriptFromDOM();
+  }
+}
+
+function liveSnapshot() {
+  return {
+    words: allWords.map(w => ({ ...w })),
+    breaks: [...breakPositions],
+    names: { ...speakerNames },
+  };
+}
+
+// Call AFTER the edit: the signature is what the model looks like with the
+// fix in, so undo only fires while nothing else has changed since.
+function livePushUndo(snap) {
+  snap.sig = liveModelSig();
+  live.undo.push(snap);
+  if (live.undo.length > LIVE_UNDO_MAX) live.undo.shift();
+}
+
+// Replace one caption's words, keeping each surviving word's timing.
+function liveApplyCueTokens(r, tokens, note = null) {
+  // Give reconcileWords the neighbouring word on each side, so a word
+  // inserted at either edge of the line interpolates from real timing.
+  const lo = Math.max(0, r.s - 1);
+  const hi = Math.min(allWords.length, r.e + 1);
+  const before = r.s > lo ? [allWords[lo].word] : [];
+  const after = hi > r.e ? [allWords[r.e].word] : [];
+  const merged = reconcileWords(allWords.slice(lo, hi), [...before, ...tokens, ...after]);
+  const slice = merged.slice(before.length, merged.length - after.length);
+  if (note) {
+    // Only the words that actually changed carry the note.
+    const old = new Set(allWords.slice(r.s, r.e).map(w => w.word));
+    slice.forEach(w => { if (!old.has(w.word)) w.liveNote = note; });
+  }
+
+  const delta = tokens.length - (r.e - r.s);
+  allWords = [...allWords.slice(0, r.s), ...slice, ...allWords.slice(r.e)];
+  breakPositions = breakPositions.map(b => (b > r.s ? b + delta : b));
+}
+
+function liveRerender() {
+  const view = document.getElementById('script-view');
+  const hadFocus = view && view.contains(document.activeElement);
+  const caret = hadFocus ? saveCaret(view) : null;
+  cues = flatModelToCues();
+  render();
+  if (hadFocus) restoreCaret(document.getElementById('script-view'), caret);
+  autoSaveSRT(true);
+}
+
+function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+function liveApplyText(op) {
+  const ranges = liveCueRanges();
+  const r = ranges[op.cue - 1];
+  if (!r) return { ok: false, reason: 'no such line' };
+  const was = liveCueText(r);
+  if (op.expect != null && was !== op.expect) {
+    return { ok: false, reason: 'changed: that line has been edited since', text: was };
+  }
+
+  let next;
+  if (op.op === 'set') {
+    next = String(op.text || '');
+  } else {
+    const find = String(op.find || '').trim();
+    if (!find) return { ok: false, reason: 'nothing to find', text: was };
+    // Whole words first ("SVOD" shouldn't match inside "SVODs"), then anywhere.
+    const whole = new RegExp(`(^|[^\\p{L}\\p{N}'])${escapeRegExp(find)}(?=$|[^\\p{L}\\p{N}'])`, 'iu');
+    const loose = new RegExp(escapeRegExp(find), 'i');
+    const replace = String(op.replace ?? '');
+    if (whole.test(was)) next = was.replace(whole, (m, pre) => pre + replace);
+    else if (loose.test(was)) next = was.replace(loose, () => replace);
+    else return { ok: false, reason: `"${find}" isn't in that line`, text: was };
+  }
+
+  const tokens = next.replace(/\n/g, ' ').trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return { ok: false, reason: 'that would empty the line', text: was };
+  if (tokens.join(' ') === was) return { ok: true, cue: op.cue, text: was, was };
+
+  const snap = liveSnapshot();
+  liveApplyCueTokens(r, tokens, op.note ? `${op.note} (was: ${was})` : null);
+  livePushUndo(snap);
+  // Flash just the words that changed (the whole line if it's all reshuffled).
+  const old = new Set(was.split(' '));
+  const changed = tokens.map((t, k) => (old.has(t) ? -1 : r.s + k)).filter(k => k >= 0);
+  live.fixed = changed.length ? changed : tokens.map((t, k) => r.s + k);
+  liveRerender();
+  return { ok: true, cue: op.cue, text: tokens.join(' '), was };
+}
+
+function liveApplySpeaker(op) {
+  const name = String(op.name || '').trim();
+  if (!name) return { ok: false, reason: 'no new name given' };
+  const ids = allWords.length ? speakerIds() : [];
+  const key = String(op.speaker ?? '').trim().toLowerCase();
+  let id;
+  if (/^\d+$/.test(key) && ids.includes(Number(key))) id = Number(key);
+  else id = ids.find(i => speakerLabel(i).toLowerCase() === key);
+  if (id === undefined) {
+    return { ok: false, reason: `no speaker called "${op.speaker}"`, text: ids.map(speakerLabel).join(', ') };
+  }
+  const was = speakerLabel(id);
+  const snap = liveSnapshot();
+  speakerNames[speakerKey(id)] = name;
+  livePushUndo(snap);
+  saveSpeakerNames();
+  render();
+  return { ok: true, text: name, was };
+}
+
+function liveApplyFocus(op) {
+  const ranges = liveCueRanges();
+  const n = Number(op.cue);
+  const r = ranges[n - 1];
+  if (!r) return { ok: false, reason: 'no such line' };
+  live.shownCue = n;
+  live.focusCue = n;
+  container.querySelectorAll('.word.live-shown').forEach(sp => sp.classList.remove('live-shown'));
+  liveDecorate();
+  const span = container.querySelector(`.word[data-idx="${r.s}"]`);
+  if (span) span.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  livePublishSoon();
+  return { ok: true, cue: n, text: liveCueText(r) };
+}
+
+// Undo the last voice edit — only while nothing else has changed since,
+// so it can never roll back Ben's own typing.
+function liveUndoLast() {
+  const top = live.undo[live.undo.length - 1];
+  if (!top) return { ok: false, reason: 'nothing to undo' };
+  if (top.sig !== liveModelSig()) {
+    live.undo = [];
+    return { ok: false, reason: 'the transcript has been edited since, so I left it' };
+  }
+  live.undo.pop();
+  allWords = top.words;
+  breakPositions = top.breaks;
+  speakerNames = top.names;
+  saveSpeakerNames();
+  liveRerender();
+  return { ok: true };
+}
+
+function liveApply(op) {
+  try {
+    if (op.op === 'focus') return liveApplyFocus(op);
+    if (!allWords.length) return { ok: false, reason: 'no transcript open' };
+    liveFlushTyping();
+    if (op.op === 'replace' || op.op === 'set') return liveApplyText(op);
+    if (op.op === 'speaker') return liveApplySpeaker(op);
+    if (op.op === 'undo') return liveUndoLast();
+    return { ok: false, reason: `unknown op ${op.op}` };
+  } catch (e) {
+    return { ok: false, reason: `error: ${e.message}` };
+  }
+}
+
+async function livePoll() {
+  if (live.polling) return;
+  live.polling = true;
+  try {
+    const fv = live.flagsVersion == null ? '' : live.flagsVersion;
+    const res = await api('GET', `/api/live/poll?tab=${live.tab}&fv=${fv}`);
+    if (!res.active) {
+      // The server restarted, or another tab took over and this one is
+      // in front again: publish so the server knows which tab is live.
+      if (document.visibilityState === 'visible' && !live.publishTimer) livePublish();
+      return;
+    }
+    if (res.flags) {
+      live.flags = res.flags.items || [];
+      live.flagsVersion = res.flags.version;
+      container.querySelectorAll('.word.live-flag').forEach(sp => {
+        sp.classList.remove('live-flag');
+        sp.removeAttribute('title');
+      });
+      liveDecorate();
+    }
+    if (res.ops && res.ops.length) {
+      const results = res.ops.map(op => ({ id: op.id, op: op.op, flag: op.flag, ...liveApply(op) }));
+      const fixed = results.filter(r => r.ok && (r.op === 'replace' || r.op === 'set')).length;
+      if (fixed) setStatus(`Voice fix${fixed > 1 ? 'es' : ''} applied · Ctrl+Z undoes`);
+      await api('POST', '/api/live/results', { tab: live.tab, results });
+    }
+  } catch (e) {
+    // Server not reachable — try again next tick.
+  } finally {
+    live.polling = false;
+  }
+}
+
+// Which line Ben's caret is on, for the call ("this line") and HQ's strip.
+document.addEventListener('selectionchange', () => {
+  const sel = window.getSelection();
+  if (!sel.rangeCount) return;
+  let node = sel.getRangeAt(0).startContainer;
+  if (node && node.nodeType === Node.TEXT_NODE) node = node.parentElement;
+  if (!node || !container.contains(node)) return;
+  let wordEl = node.closest && node.closest('.word');
+  if (!wordEl && node.querySelector) wordEl = node.querySelector('.word');
+  if (!wordEl || wordEl.dataset.idx == null) return;
+  const n = liveCueOfWord(Number(wordEl.dataset.idx));
+  if (n !== live.focusCue) { live.focusCue = n; livePublishSoon(); }
+});
+
+// Ctrl/Cmd+Z right after a voice fix undoes the fix. A re-render clears the
+// browser's own undo history anyway, so nothing native is lost by taking it.
+document.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== 'z') return;
+  const top = live.undo[live.undo.length - 1];
+  if (!top || reconcileTimer || top.sig !== liveModelSig()) return;
+  e.preventDefault();
+  const r = liveUndoLast();
+  if (r.ok) toast('Voice fix undone.', 'success', 1500);
+}, true);
+
+window.addEventListener('pagehide', () => {
+  navigator.sendBeacon('/api/live/close', JSON.stringify({ tab: live.tab }));
+});
+
+setInterval(livePoll, LIVE_POLL_MS);
+livePublish();
