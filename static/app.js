@@ -1416,24 +1416,67 @@ async function openSrtFromDisk() {
     setStatus('Loading…');
     const res = await api('POST', '/api/load-srt', { filePath: browse.path });
     if (res.error) { toast(res.error, 'error'); setStatus('Error.'); return; }
-
-    cues = res.cues;
-    fileName = browse.path.split(/[/\\]/).pop();
-    // Keep the full path — autoSaveSRT strips the final extension itself.
-    // (Stripping .srt here too made "my.video.srt" auto-save to "my.srt".)
-    sourceFilePath = browse.path;
-
-    fileNameDisplay.textContent = fileName;
-    fileNameDisplay.classList.add('loaded');
-    if (modelTag) modelTag.textContent = '';  // SRT load — no Whisper model involved
-    allWords = [];
-    srtVersion = 0;
-    loadSpeakerNames();
-    render();
-    setStatus(`Loaded ${res.count} cues from ${fileName}`);
+    openLoadedSrt(browse.path, res);
     toast(`Loaded ${res.count} cues. Auto-save active.`, 'success');
   } catch (err) { toast('Failed to load file.', 'error'); setStatus('Error.'); }
 }
+
+// Show an SRT read by /api/load-srt and auto-save back to the same file.
+function openLoadedSrt(srtPath, res) {
+  cues = res.cues;
+  fileName = srtPath.split(/[/\\]/).pop();
+  // Keep the full path: autoSaveSRT strips the final extension itself.
+  // (Stripping .srt here too made "my.video.srt" auto-save to "my.srt".)
+  sourceFilePath = srtPath;
+  rememberOpenSrt(srtPath, false);
+
+  fileNameDisplay.textContent = fileName;
+  fileNameDisplay.classList.add('loaded');
+  if (modelTag) modelTag.textContent = '';  // SRT load, no Whisper model involved
+  allWords = [];
+  srtVersion = 0;
+  loadSpeakerNames();
+  render();
+  setStatus(`Loaded ${res.count} cues from ${fileName}`);
+}
+
+// ── Surviving a page refresh ──────────────────────────────────────────────
+// The transcript lives only in this tab, but every edit is auto-saved to an
+// SRT on disk. Remember which one (per tab: a fresh launch opens the landing
+// page), and after a refresh reopen it. sourceFilePath is set to the SRT
+// itself, so auto-save keeps writing to exactly the same file.
+const OPEN_SRT_KEY = 'openSrt';
+
+function srtPathFor(path) {
+  return path.replace(/\.[^.]+$/, '') + '.srt';  // where autoSaveSRT writes
+}
+
+function rememberOpenSrt(srtPath, transcribed) {
+  try {
+    if (srtPath) sessionStorage.setItem(OPEN_SRT_KEY, JSON.stringify({ path: srtPath, transcribed }));
+    else sessionStorage.removeItem(OPEN_SRT_KEY);
+  } catch (e) { /* storage unavailable */ }
+}
+
+async function restoreOpenSrt() {
+  let saved = null;
+  try { saved = JSON.parse(sessionStorage.getItem(OPEN_SRT_KEY)); } catch (e) { /* none */ }
+  if (!saved || !saved.path || cues.length) return;
+  try {
+    const res = await api('POST', '/api/load-srt', { filePath: saved.path });
+    if (res.error || !res.cues || !res.cues.length || cues.length) {
+      if (res.error) rememberOpenSrt(null);  // gone from disk: stay on the landing page
+      return;
+    }
+    openLoadedSrt(saved.path, res);
+    // A transcription had Whisper's per-word confidence; the SRT doesn't.
+    rememberOpenSrt(saved.path, saved.transcribed);
+    toast(saved.transcribed
+      ? `Reopened ${fileName}. Caption timing is kept; confidence marks are not.`
+      : `Reopened ${fileName}`, 'success', 4000);
+  } catch (e) { /* server unreachable: leave the landing page up */ }
+}
+
 btnBrowse.addEventListener('click', openSrtFromDisk);
 if (btnBrowseEmpty) btnBrowseEmpty.addEventListener('click', openSrtFromDisk);
 
@@ -1758,6 +1801,7 @@ async function pollTranscription() {
         if (sourceFilePath) {
           autoSaveSRT();
         }
+        rememberOpenSrt(sourceFilePath ? srtPathFor(sourceFilePath) : null, true);
       } else {
         toast('Transcription produced no words.', 'warn');
         setStatus('Transcription complete but no words detected.');
@@ -1789,7 +1833,7 @@ async function autoSaveSRT(quiet = false) {
   }
   autoSaveBusy = true;
   // Save SRT next to the source file (replace extension with .srt)
-  const srtPath = sourceFilePath.replace(/\.[^.]+$/, '') + '.srt';
+  const srtPath = srtPathFor(sourceFilePath);
   try {
     const res = await api('POST', '/api/save-srt', { filePath: srtPath, cues });
     if (res.error) {
@@ -2542,3 +2586,6 @@ async function pollReview() {
   }
   reviewSyncButton();
 })();
+
+// After a refresh, reopen the SRT this tab had open (see rememberOpenSrt).
+restoreOpenSrt();

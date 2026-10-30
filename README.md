@@ -37,6 +37,20 @@ You need Python 3.11+ on your machine. Get it from
 2. Double-click **`setup.bat`** (one time only).
 3. Double-click **`run.bat`** to start the app.
 
+## Refreshing the page and code changes
+
+- **Refresh is safe.** Every edit auto-saves the SRT next to the media, and
+  the tab remembers which SRT it had open. After a refresh it reopens that
+  SRT (a toast says "Reopened ...") and keeps saving to the same file. The
+  caption text and timing come back; Whisper's per-word confidence marks
+  don't, since the SRT doesn't hold them. A new launch still opens on the
+  landing page, and if the SRT has gone the landing page shows as usual.
+- **The server reloads itself** when one of its `.py` files changes, so a
+  code edit needs no restart. It waits until no transcription or AI review
+  is running first, and the open tab reconnects on its own. Changes to
+  `static/` files only need a page refresh. Set `SUBTITLE_NO_RELOAD=1` to
+  turn the reloader off.
+
 ## Transcript documents and speaker names
 
 The **Transcript** tab in the top bar shows the same transcript as a

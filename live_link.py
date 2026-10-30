@@ -147,6 +147,11 @@ class LiveLink:
             and time.time() - self._last_poll < TAB_TIMEOUT_S
         )
 
+    def has_pending(self):
+        """Edits are queued that the tab hasn't collected yet."""
+        with self._cv:
+            return bool(self._queue)
+
     def closed_reply(self):
         return {'open': False, 'reason': 'No transcript is open in the Subtitle editor.'}
 
