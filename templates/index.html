@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Geist:wght@300..700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css?v=30">
+<link rel="stylesheet" href="/static/style.css?v=31">
 </head>
 <body>
 
@@ -70,6 +70,10 @@
             <option value="two_line">Wrap to 2 lines</option>
             <option value="split">Split into separate cues</option>
           </select>
+        </label>
+        <label id="break-at-speakers-row" class="toggle-inline setting-check" hidden title="Start a new caption whenever a different person starts talking. Applies when formatting.">
+          <input id="break-at-speakers" type="checkbox" checked>
+          <span>Break at speaker changes</span>
         </label>
         <button id="btn-auto-format" class="btn-primary">Apply formatting</button>
       </div>
@@ -211,6 +215,7 @@
 
 <script src="/static/vendor/typo.js"></script>
 <script src="/static/review_style.js?v=2"></script>
-<script src="/static/app.js?v=31"></script>
+<script src="/static/caption_breaks.js?v=1"></script>
+<script src="/static/app.js?v=32"></script>
 </body>
 </html>

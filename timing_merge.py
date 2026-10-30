@@ -395,7 +395,8 @@ def merge(whisper_words: list[dict], deepgram_words: list[dict],
     _make_monotonic(words)
 
     if keep_speakers:
-        _carry_speakers(words, speaker_of)
+        _carry_speakers(words, speaker_of, deepgram_words)
+        smooth_speaker_blips(words)
 
     stats["applied"] = True
     return words, stats
@@ -460,19 +461,79 @@ def _make_monotonic(words):
         prev_end = w["end"]
 
 
-def _carry_speakers(words, speaker_of):
-    """Deepgram's speaker on matched words; unmatched words take the
-    previous word's speaker (or the next one's at the very start)."""
-    last = None
+def _carry_speakers(words, speaker_of, deepgram_words=()):
+    """Deepgram's speaker on matched words. An unmatched word between two
+    matched words of the same speaker takes that speaker. One sitting at a
+    change of speaker goes by time instead: it takes the speaker of the
+    nearest Deepgram word (of those two), so a word Deepgram dropped at the
+    start of a reply isn't handed to the person who was talking before.
+    Unmatched words at either end take the nearest matched word's speaker."""
+    known = [(i, speaker_of[i]) for i in sorted(speaker_of) if speaker_of[i] is not None]
+    if not known:
+        for w in words:
+            w["speaker"] = None
+        return
+    timed = [d for d in deepgram_words if d.get("speaker") is not None]
+    k = 0  # known[k] is the next matched word at or after i
     for i, w in enumerate(words):
-        if i in speaker_of and speaker_of[i] is not None:
-            last = speaker_of[i]
-        w["speaker"] = last
-    first = next((w["speaker"] for w in words if w["speaker"] is not None), None)
-    for w in words:
-        if w["speaker"] is not None:
-            break
-        w["speaker"] = first
+        while k < len(known) and known[k][0] < i:
+            k += 1
+        if k < len(known) and known[k][0] == i:
+            w["speaker"] = known[k][1]
+            continue
+        before = known[k - 1][1] if k > 0 else None
+        after = known[k][1] if k < len(known) else None
+        if before is None or after is None or before == after:
+            w["speaker"] = before if before is not None else after
+            continue
+        w["speaker"] = _nearest_speaker(w, timed, (before, after)) or before
+
+
+def _nearest_speaker(w, deepgram_words, choices):
+    """Speaker (one of choices) of the Deepgram word nearest w in time."""
+    mid = (float(w["start"]) + float(w["end"])) / 2
+    best, best_d = None, None
+    for d in deepgram_words:
+        if d["speaker"] not in choices:
+            continue
+        s, e = float(d["start"]), float(d["end"])
+        dist = 0.0 if s <= mid <= e else min(abs(mid - s), abs(mid - e))
+        if best_d is None or dist < best_d:
+            best, best_d = d["speaker"], dist
+    return best
+
+
+# A one-word change of speaker this tight against both neighbours, in the
+# middle of a sentence, is diarisation flicker rather than someone cutting in.
+BLIP_GAP_S = 0.3
+_ENDS_SENTENCE = re.compile(r"[.!?…][\"')\]]*$")
+_ENDS_CLAUSE = re.compile(r"[.!?…,;:][\"')\]]*$")
+
+
+def smooth_speaker_blips(words):
+    """Give a lone word back to the speaker on both sides of it when it is
+    clearly a diarisation flicker: same speaker either side, mid-sentence
+    (the word before doesn't end a sentence, the word itself doesn't end a
+    clause) and no real pause either side. A one-word reply ("Yeah.") is
+    kept: it ends in punctuation, and usually has a pause around it.
+    Returns how many words were changed."""
+    changed = 0
+    for i in range(1, len(words) - 1):
+        prev, w, nxt = words[i - 1], words[i], words[i + 1]
+        sp = prev.get("speaker")
+        if sp is None or w.get("speaker") is None or w["speaker"] == sp:
+            continue
+        if nxt.get("speaker") != sp:
+            continue
+        if _ENDS_SENTENCE.search(prev["word"]) or _ENDS_CLAUSE.search(w["word"]):
+            continue
+        gap_in = float(w["start"]) - float(prev["end"])
+        gap_out = float(nxt["start"]) - float(w["end"])
+        if gap_in > BLIP_GAP_S or gap_out > BLIP_GAP_S:
+            continue
+        w["speaker"] = sp
+        changed += 1
+    return changed
 
 
 def summary(stats: dict) -> str:
