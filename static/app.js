@@ -1710,7 +1710,11 @@ btnBrowseMedia.addEventListener('click', async () => {
   btnBrowseMedia.disabled = false;
 });
 
-btnTranscribe.addEventListener('click', async () => {
+btnTranscribe.addEventListener('click', () => startTranscription());
+
+// Start transcribing the file in the path field with the options as ticked.
+// The Transcribe button and the ?transcribe= link both come through here.
+async function startTranscription() {
   const filePath = transcribePath.value.trim();
   if (!filePath) {
     toast('Enter a file path to transcribe.', 'warn');
@@ -1741,9 +1745,15 @@ btnTranscribe.addEventListener('click', async () => {
       btnTranscribe.textContent = 'Transcribe';
       return;
     }
+    // The server kept a copy of the SRT already next to the media, since
+    // this run's auto-save replaces it.
+    if (res.backup) {
+      toast(`Kept the existing SRT as ${res.backup.split(/[\\/]/).pop()}`, 'info', 7000);
+    }
 
     transcribeJobId = res.jobId;
     sourceFilePath = filePath;  // remember source for auto-save
+    rememberTranscribeJob();
     transcribeBar.classList.remove('hidden');
     transcribeFill.style.width = '0%';
     btnTranscribe.textContent = 'Transcribing…';
@@ -1757,7 +1767,98 @@ btnTranscribe.addEventListener('click', async () => {
     btnTranscribe.disabled = false;
     btnTranscribe.textContent = 'Transcribe';
   }
-});
+}
+
+// A running job outlives a page refresh on the server, but its result only
+// reaches disk once this tab saves it, so the tab keeps the job id and picks
+// the job up again after a reload.
+const TRANSCRIBE_JOB_KEY = 'transcribeJob';
+
+function rememberTranscribeJob() {
+  try {
+    if (transcribeJobId) {
+      sessionStorage.setItem(TRANSCRIBE_JOB_KEY,
+        JSON.stringify({ jobId: transcribeJobId, path: sourceFilePath }));
+    } else sessionStorage.removeItem(TRANSCRIBE_JOB_KEY);
+  } catch (e) { /* storage unavailable */ }
+}
+
+async function resumeTranscribeJob() {
+  let saved = null;
+  try { saved = JSON.parse(sessionStorage.getItem(TRANSCRIBE_JOB_KEY)); } catch (e) { /* none */ }
+  if (!saved || !saved.jobId || cues.length || transcribeJobId) return false;
+  let job;
+  try {
+    job = await api('GET', `/api/transcribe/status?jobId=${saved.jobId}`);
+  } catch (e) { return false; }
+  if (!job.status || job.status === 'error' || cues.length) {
+    try { sessionStorage.removeItem(TRANSCRIBE_JOB_KEY); } catch (e) { /* ignore */ }
+    return false;
+  }
+  transcribeJobId = saved.jobId;
+  sourceFilePath = saved.path || null;
+  if (saved.path) transcribePath.value = saved.path;
+  btnTranscribe.disabled = true;
+  btnTranscribe.textContent = 'Transcribing…';
+  transcribeBar.classList.remove('hidden');
+  transcribePollTimer = setInterval(pollTranscription, 1500);
+  pollTranscription();
+  return true;
+}
+
+// A link like /?transcribe=<path to audio or video>[&engine=whisper|deepgram]
+// [&sharpen=0|1][&speakers=0|1][&model=large-v2][&note=<what the video is
+// about>] starts the same transcription as the button (how an operator starts
+// one for Ben). The options apply to this run only; his saved choices stay.
+async function transcribeFromLink() {
+  const url = new URL(location.href);
+  const p = url.searchParams;
+  if (!p.has('transcribe')) return false;
+  const asked = (p.get('transcribe') || '').trim();
+  const flag = (name) => (p.has(name) ? !/^(0|false|no|off)$/i.test(p.get(name) || '') : null);
+  const engine = (p.get('engine') || '').trim().toLowerCase();
+  const sharpen = flag('sharpen');
+  const speakers = flag('speakers');
+  const model = (p.get('model') || '').trim();
+  const note = (p.get('note') || '').trim();
+  for (const k of ['transcribe', 'engine', 'sharpen', 'speakers', 'model', 'note']) p.delete(k);
+  history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+  if (!asked) return false;
+  if (cues.length || transcribeJobId) {
+    toast('Close the open transcript before starting another from a link.', 'warn', 6000);
+    return false;
+  }
+
+  await enginesChecked;   // the Deepgram options settle once the server answers
+  if (engine === 'deepgram' && transcribeDiarize && !transcribeDiarize.disabled) {
+    transcribeDiarize.checked = true;      // Deepgram's own words, with speakers
+    if (transcribeSharpen) transcribeSharpen.checked = false;
+  } else if (engine === 'whisper' && transcribeDiarize && speakers === null) {
+    transcribeDiarize.checked = false;
+  }
+  if (speakers !== null && transcribeDiarize && !transcribeDiarize.disabled) {
+    transcribeDiarize.checked = speakers;
+  }
+  if (sharpen !== null && transcribeSharpen) {
+    if (sharpen && transcribeSharpen.disabled) {
+      toast('Deepgram is not set up, so timing comes from Whisper alone.', 'warn', 6000);
+    } else transcribeSharpen.checked = sharpen;
+  }
+  if (model && transcribeModel && [...transcribeModel.options].some(o => o.value === model)) {
+    transcribeModel.value = model;
+  }
+  syncDiarizeUI();
+
+  // Pre-fill the Review box for the transcript this run makes (the note is
+  // keyed by the SRT's file name, which is what fileName becomes).
+  if (note) {
+    const srtName = asked.split(/[\\/]/).pop().replace(/\.[^.]+$/, '') + '.srt';
+    try { localStorage.setItem(`reviewNote:${srtName}`, note); } catch (e) { /* storage blocked */ }
+  }
+  transcribePath.value = asked;
+  await startTranscription();
+  return true;
+}
 
 async function pollTranscription() {
   if (!transcribeJobId) return;
@@ -1896,6 +1997,7 @@ function stopTranscriptionPolling() {
     transcribePollTimer = null;
   }
   transcribeJobId = null;
+  rememberTranscribeJob();
   transcribeBar.classList.add('hidden');
   btnTranscribe.disabled = false;
   btnTranscribe.textContent = 'Transcribe';
@@ -1954,16 +2056,17 @@ function syncDiarizeUI() {
 if (transcribeDiarize) {
   transcribeDiarize.addEventListener('change', syncDiarizeUI);
 }
-// Default off, but remembered: Ben may want it on nearly every job.
+// On by default whenever Deepgram is set up; once Ben changes it, his
+// choice is remembered.
 if (transcribeSharpen) {
-  transcribeSharpen.checked = localStorage.getItem('sharpenTiming') === 'true';
+  transcribeSharpen.checked = localStorage.getItem('sharpenTiming') !== 'false';
   transcribeSharpen.addEventListener('change', () => {
     localStorage.setItem('sharpenTiming', String(transcribeSharpen.checked));
     syncDiarizeUI();
   });
 }
 
-(async function checkEngines() {
+const enginesChecked = (async function checkEngines() {
   try {
     const r = await api('GET', '/api/engines');
     deepgramReady = !!r.deepgram;
@@ -2643,5 +2746,10 @@ async function pollReview() {
   reviewSyncButton();
 })();
 
-// Open ?open=<srt>, or after a refresh the SRT this tab had open.
-restoreOpenSrt();
+// Start ?transcribe=<media> or open ?open=<srt>. After a refresh, pick up
+// this tab's running transcription, or reopen the SRT it had open.
+(async function openOnLoad() {
+  if (await transcribeFromLink()) return;
+  if (await resumeTranscribeJob()) return;
+  await restoreOpenSrt();
+})();

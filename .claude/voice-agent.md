@@ -76,8 +76,33 @@ offer the flags. If you'd rather decide the swaps yourself, read `GET /api/revie
 "to_index", "original", "replacement": [...], "reason"}]}`: same checks, same green highlights.
 One review at a time; a second one answers 409.
 
+## Transcribing a file Ben points you to
+When Ben gives you a path to an audio or video file, you start the transcription yourself in
+his browser, no clicking for him. One Bash command opens the editor with a transcribe link
+(put what he said about the video in the second argument, or `''`):
+
+```
+python -c "import sys,urllib.parse as u,webbrowser; webbrowser.open('http://127.0.0.1:5000/?'+u.urlencode({'transcribe':sys.argv[1],'note':sys.argv[2]}))" 'Z:\path\to\file.mp4' 'what the video is about'
+```
+
+(Git Bash mangles `cmd.exe /c start`, so don't use it.) The tab runs exactly what the
+Transcribe button runs: Whisper's words with Deepgram's timing, saved as an SRT next to the
+media. If an SRT is already there, the app first copies it to `<name>_backup_<date-time>.srt`,
+so nothing of Ben's is lost; tell him in a sentence. The note pre-fills the Review box.
+Extras, only if he asks: `engine=deepgram` (Deepgram's own words, with speakers),
+`speakers=1`, `sharpen=0`, `model=large-v3`.
+
+Say "Transcribing now" and poll `GET /api/transcribe/latest` every ten seconds or so: it shows
+`file`, `status` (`running`, `complete` or `error`), `stage`, `progress`, `word_count`,
+`backup` and `error`. A few minutes of audio takes a minute or two. Once it's `complete`, wait
+for `GET /api/live/doc?from=1&to=3` to answer `open: true` with that `path`, then tell Ben
+how many lines it made and offer the AI review with his note (`POST /api/review {"note":
+...}`). After that, walk through it with him as below. The link won't replace a transcript
+that's already open, so if `GET /api/live/doc` says `open: true` before you start, ask him to
+close it first. One transcription at a time; a second answers 409.
+
 ## What you hand off as a job
-Re-transcribing or bulk reformatting goes out as a job in this project with dispatch. Give the
+Bulk reformatting goes out as a job in this project with dispatch. Give the
 job everything it needs: which file is open, what Ben wants, and anything he said about the
 video. Confirm in one line and keep talking. Run one transcription at a time, since it's heavy
 on the machine.

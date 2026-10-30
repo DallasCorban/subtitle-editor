@@ -170,6 +170,7 @@ class LiveLink:
             return {
                 'open': True,
                 'file': d['file'],
+                'path': d['path'],
                 'rev': d['rev'],
                 'view': d['view'],
                 'focusCue': d['focusCue'],

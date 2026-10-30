@@ -23,12 +23,14 @@ import os
 import shutil
 import sys
 import threading
+import time
 import uuid
 from typing import Optional
 
 _models: dict = {}  # model_name -> WhisperModel (faster-whisper only; mlx caches via repo path)
 _model_lock = threading.Lock()
 _jobs: dict = {}  # job_id -> job state dict
+_latest_job_id: Optional[str] = None  # the job /api/transcribe/latest reports
 
 # Default chosen for verbatim accuracy on clean English voiceover:
 # large-v2 paraphrases noticeably less than large-v3 on this kind of content.
@@ -62,7 +64,9 @@ def start_transcription(
             "A transcription is already in progress. Wait for it to finish."
         )
 
+    global _latest_job_id
     job_id = str(uuid.uuid4())
+    _latest_job_id = job_id
     _jobs[job_id] = {
         "status": "running",
         "progress": 0.0,
@@ -72,6 +76,9 @@ def start_transcription(
         "words": [],
         "error": None,
         "file": os.path.basename(file_path),
+        "file_path": file_path,
+        "started_at": time.time(),
+        "finished_at": None,
         "model": model or os.environ.get("SUBTITLE_WHISPER_MODEL", ""),
         "engine": engine,
         # Deepgram's batch API is one request, so the UI reports which phase
@@ -101,6 +108,17 @@ def start_transcription(
 
 def get_job_status(job_id: str) -> Optional[dict]:
     return _jobs.get(job_id)
+
+
+def latest_job_summary() -> Optional[dict]:
+    """The most recent job without its word list, for a quick status check."""
+    job = _jobs.get(_latest_job_id) if _latest_job_id else None
+    if job is None:
+        return None
+    out = {k: v for k, v in job.items() if k != "words"}
+    out["jobId"] = _latest_job_id
+    out["word_count"] = len(job.get("words") or [])
+    return out
 
 
 def get_model_status() -> dict:
@@ -139,6 +157,8 @@ def _run_transcription(
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
+    finally:
+        job["finished_at"] = time.time()
 
 
 def _transcribe_with_whisper(job: dict, file_path: str, language: str, model: str | None):
