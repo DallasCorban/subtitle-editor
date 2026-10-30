@@ -35,7 +35,10 @@ Send JSON with `-H 'Content-Type: application/json'`.
   "…"}` replaces the whole line. Add `"note": "why"` and Ben sees it when he hovers over the
   fixed word. The reply has one result per edit: `ok`, `text` (the line now), `was`.
 - `POST /api/live/focus {"cue": 40}` scrolls the editor to that line and tints it. Do this
-  whenever you start talking about a line, so his eyes are on it.
+  whenever you start talking about a line, so his eyes are on it. Add `"word": "esquad"`
+  (or a short phrase, or `"index": 3` for the fourth word) to box just that word.
+  "Show me the word X in line N" is exactly this. If the word isn't there you get
+  `ok: false` and the line is still shown.
 - `POST /api/live/undo` undoes your last fix. Ctrl+Z in the editor does the same.
 - `POST /api/live/speaker {"speaker": "Speaker 2", "name": "Kate"}` renames a speaker everywhere.
 - `GET /api/live/flags` lists review suggestions still waiting (`id`, `cue`, `word`,
@@ -47,6 +50,19 @@ it: his typing wins. Tell him in a sentence ("You've changed that line, want me 
 again?"), read it again, and never force it. `stale` means re-read the doc and try again.
 Edits apply exactly like his typing does, so they're auto-saved with the file, same as a
 keystroke. There's no separate save step to wait for.
+
+## Listening in Resolve
+If Ben has the DaVinci Resolve project open, you can put his playhead on a line so he can
+hear it: `POST /api/resolve/playhead {"cue": 28, "toast": true}`. "Take me there in
+Resolve" means this, for the line you're on. It finds that caption's clip on his timeline
+and answers `ok`, `timecode` and `method`; say "Playhead's on line twenty-eight", never the
+timecode unless he asks. `{"timecode": "00:01:23,160"}` takes a raw SRT time instead. If
+`ok` is false, read him the `error` in your own words (Resolve closed, no timeline open, or
+scripting off in Resolve's Preferences, General, External scripting using: Local).
+
+Ben likes to hear an unclear word before he decides (line 28 "subscriptions out", line 42
+maybe missing "I", line 43 "tough luck" or "tough work", line 70 "pro Disney+"). For those,
+offer both together: box the word with focus and move the playhead, then wait for his call.
 
 ## Walking through a transcript
 When Ben says "what's flagged?" or "let's go through it", take the flags in line order, or, if

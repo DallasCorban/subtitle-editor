@@ -1210,6 +1210,14 @@ body:not(.view-transcript) #timestamp-toggle {
   background: rgba(122, 162, 255, .14);
 }
 
+/* The word in it the call is pointing at: a soft teal box, so it never
+   reads as the green fix flash, the violet flag or the amber unsure word. */
+.word.live-word {
+  background: rgba(64, 196, 210, .22);
+  box-shadow: 0 0 0 1.5px rgba(64, 196, 210, .75);
+  border-radius: 3px;
+}
+
 /* A fix that carries a note (a review change): green underline, hover
    shows the reason, click to see what it was and revert it. */
 .word.live-noted { cursor: help; }

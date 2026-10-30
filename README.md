@@ -203,6 +203,28 @@ The bridge is **read-only**. Resolve's scripting API doesn't currently
 allow writing back to existing subtitle items, so updates flow back via
 "Save new version" → drag the resulting SRT onto the timeline.
 
+### Taking the playhead to a caption
+
+So you can listen to an unclear word before deciding, the app can move the
+playhead of the timeline open in Resolve to a caption. Nothing else in the
+project changes.
+
+| | |
+|---|---|
+| `POST /api/resolve/playhead {"cue": 28}` | caption 28 of the open transcript |
+| `POST /api/resolve/playhead {"timecode": "00:01:23,160"}` | a raw SRT time |
+
+Add `"toast": true` and the editor shows "Playhead moved to 01:00:37:00".
+It first looks for that caption's subtitle clip on the timeline (by its
+text, nearest the SRT time when the same words appear twice) and uses the
+clip's real position, so an SRT dropped with an offset still lines up; the
+reply's `method` is `subtitle-clip`. With no matching clip it uses the
+timeline's start timecode plus the caption's SRT start (`srt-time`). Frame
+rate and drop frame come from the timeline settings. The reply has
+`timecode`, `method`, `project`, `timeline` and `offsetFrames`; when Resolve
+isn't running, scripting is off, or no project or timeline is open, it's
+`{"ok": false, "error": "<one plain sentence>"}`.
+
 ## Notes on transcription speed
 
 The app picks a different transcription backend per platform so each
@@ -252,6 +274,12 @@ transcript you have open without fighting the tab's auto-save:
   line since, the edit is rejected, so your typing always wins.
 - Review suggestions posted to `/api/live/flags` show as violet dotted
   underlines; hover for the suggestion.
+- `POST /api/live/focus {"cue": 28}` scrolls to a caption and tints it blue.
+  Add `"word": "subscriptions"` (case and punctuation ignored, first match; a
+  short phrase like `"tough luck"` works too) or `"index": 3` (0-based word
+  position) to box just that word in teal. It clears when you type or on the
+  next focus. A word that isn't there answers `ok: false` with the reason, and
+  the caption is still shown.
 - `/api/live/strip` is a one-line summary Claude HQ shows during a call.
 
 Everything is in memory and localhost-only. With no editor tab open, every
