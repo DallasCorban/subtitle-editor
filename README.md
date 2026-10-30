@@ -47,6 +47,18 @@ You need Python 3.11+ on your machine. Get it from
   landing page, and if the SRT has gone the landing page shows as usual.
 - **Open an SRT by link:** `http://127.0.0.1:5000/?open=<url-encoded path
   to an .srt>` opens that file the same way, with auto-save back to it.
+- **Transcribe by link:** `http://127.0.0.1:5000/?transcribe=<url-encoded
+  path to audio or video>` starts the same transcription as the Transcribe
+  button (with the boxes as ticked), shows progress and opens the result.
+  Optional for that run only: `&note=<what the video is about>` (pre-fills
+  the Review box), `&sharpen=0|1`, `&speakers=0|1`, `&engine=deepgram`,
+  `&model=large-v3`. This is how the voice agent starts one for you; the
+  command it uses is in `.claude/voice-agent.md`. `GET
+  /api/transcribe/latest` shows the most recent job (status, stage,
+  progress, word count) from a shell. Refreshing mid-job picks it up again.
+- **An existing SRT is kept.** Before any transcription the server copies an
+  SRT already next to the media to `<name>_backup_<yyyymmdd-hhmmss>.srt`,
+  since the new transcript saves over it. A toast names the copy.
 - **The server reloads itself** when one of its `.py` files changes, so a
   code edit needs no restart. It waits until no transcription or AI review
   is running first, and the open tab reconnects on its own. Changes to
@@ -127,7 +139,8 @@ hour of interview roughly 30 to 50 cents. It adds little time, because
 Deepgram usually finishes before Whisper does.
 
 When to use it: any job where caption timing matters and the audio can
-leave the machine, which is most of them. The box remembers its setting.
+leave the machine, which is most of them. The box is ticked by default when
+Deepgram is set up, and remembers it once you change it.
 Leave it off for confidential audio that must stay local. On the MECI
 Subscription voiceover it moved 450 of 456 words, typically 60 ms later.
 

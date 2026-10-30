@@ -225,18 +225,54 @@ def transcribe():
         flush=True,
     )
 
+    # The tab saves the result over <media>.srt, so keep what's there first.
+    # Only once the job can start: a refused job shouldn't leave a backup.
+    backup = None
+    if os.path.isfile(file_path) and not transcriber.is_busy():
+        try:
+            backup = _backup_sibling_srt(file_path)
+        except OSError as e:
+            return jsonify({'error': 'Could not back up the existing SRT, so the '
+                                     f'transcription was not started: {e}'}), 500
+
     try:
         job_id = transcriber.start_transcription(
             file_path, language, model=model, engine=engine,
             sharpen_timing=sharpen, keep_speakers=speakers,
         )
-        return jsonify({'jobId': job_id})
     except FileNotFoundError as e:
         return jsonify({'error': str(e)}), 400
     except RuntimeError as e:
         return jsonify({'error': str(e)}), 409
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+    transcriber.get_job_status(job_id)['backup'] = backup
+    return jsonify({'jobId': job_id, 'backup': backup})
+
+
+def _backup_sibling_srt(media_path):
+    """Copy <media>.srt to <media>_backup_<yyyymmdd-hhmmss>.srt if it exists.
+
+    Returns the backup's path, or None when there was nothing to keep.
+    """
+    import shutil
+    import time
+    base = os.path.splitext(media_path)[0]
+    srt = base + '.srt'
+    if os.path.normcase(os.path.abspath(srt)) == os.path.normcase(os.path.abspath(media_path)):
+        return None
+    if not os.path.isfile(srt):
+        return None
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    backup = f'{base}_backup_{stamp}.srt'
+    n = 2
+    while os.path.exists(backup):   # two runs inside one second
+        backup = f'{base}_backup_{stamp}-{n}.srt'
+        n += 1
+    shutil.copy2(srt, backup)
+    print(f'[transcribe] kept the existing SRT as {os.path.basename(backup)}', flush=True)
+    return backup
 
 
 @app.route('/api/transcribe-upload', methods=['POST'])
@@ -295,6 +331,19 @@ def transcribe_status():
     if job is None:
         return jsonify({'error': 'Job not found.'}), 404
 
+    return jsonify(job)
+
+
+@app.route('/api/transcribe/latest')
+def transcribe_latest():
+    """The most recent transcription job, whoever started it (no word list).
+
+    Lets a shell see whether a tab-started job is running and when it ends.
+    """
+    job = transcriber.latest_job_summary()
+    if job is None:
+        return jsonify({'status': 'none'})
+    job['srt'] = os.path.splitext(job['file_path'])[0] + '.srt'   # where the tab saves it
     return jsonify(job)
 
 
