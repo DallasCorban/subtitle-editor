@@ -75,6 +75,7 @@ const btnExportTxt      = document.getElementById('btn-export-txt');
 const showTimestampsInput = document.getElementById('show-timestamps');
 const transcribeDiarize   = document.getElementById('transcribe-diarize');
 const diarizeUnavailable  = document.getElementById('diarize-unavailable');
+const transcribeSharpen   = document.getElementById('transcribe-sharpen');
 
 // Transcription DOM refs
 const transcribePath   = document.getElementById('transcribe-path');
@@ -1725,8 +1726,14 @@ btnTranscribe.addEventListener('click', async () => {
     const model = transcribeModel ? transcribeModel.value : null;
     // Whisper is more verbatim on clean voiceover, but it cannot tell
     // speakers apart — that's the whole reason to reach for Deepgram.
-    const engine = (transcribeDiarize && transcribeDiarize.checked) ? 'deepgram' : 'whisper';
-    const res = await api('POST', '/api/transcribe', { filePath, model, engine });
+    // With "Sharpen timing" on, Whisper still writes the words and Deepgram
+    // only supplies timing (and speakers, if asked for).
+    const speakers = !!(transcribeDiarize && transcribeDiarize.checked);
+    const sharpenTiming = !!(transcribeSharpen && transcribeSharpen.checked);
+    const engine = speakers && !sharpenTiming ? 'deepgram' : 'whisper';
+    const res = await api('POST', '/api/transcribe', {
+      filePath, model, engine, sharpenTiming, speakers,
+    });
     if (res.error) {
       toast(res.error, 'error', 5000);
       setStatus('Transcription failed to start.');
@@ -1776,10 +1783,14 @@ async function pollTranscription() {
       setStatus(`Uploading to Deepgram… ${pct}%`);
     } else if (job.stage === 'processing') {
       setStatus('Deepgram is transcribing…');
+    } else if (job.stage === 'waiting-deepgram') {
+      setStatus('Whisper done, waiting for Deepgram timing…');
+    } else if (job.stage === 'merging') {
+      setStatus('Merging Deepgram timing…');
     } else if ((job.segments_done || 0) === 0 && pct === 0) {
-      setStatus('Loading model… (first run may download ~3 GB)');
+      setStatus('Loading model… (first run may download ~3 GB)' + deepgramPassNote(job));
     } else {
-      setStatus(`Transcribing… ${pct}%`);
+      setStatus(`Transcribing… ${pct}%` + deepgramPassNote(job));
     }
 
     if (job.status === 'complete') {
@@ -1803,9 +1814,11 @@ async function pollTranscription() {
           ? ` · ${job.speakers} speaker${job.speakers === 1 ? '' : 's'}`
           : '';
         toast(
-          `Transcribed ${job.words.length} words${modelSuffix}${speakerSuffix}.`,
-          'success', 4000,
+          `Transcribed ${job.words.length} words${modelSuffix}${speakerSuffix}.`
+            + (job.timing_summary && !job.timing_warning ? ` ${job.timing_summary}` : ''),
+          'success', job.timing_summary ? 7000 : 4000,
         );
+        if (job.timing_warning) toast(job.timing_warning, 'warn', 10000);
         syncViewTabs();
         setStatus(`Transcription complete — ${job.words.length} words, ${cues.length} cues${modelSuffix}.`);
 
@@ -1829,6 +1842,18 @@ async function pollTranscription() {
   } catch (e) {
     // Network error — keep polling
   }
+}
+
+// The Deepgram timing pass runs alongside Whisper; say where it is.
+function deepgramPassNote(job) {
+  const dg = job.deepgram;
+  if (!dg) return '';
+  const label = {
+    starting: 'starting', extracting: 'extracting audio',
+    uploading: `uploading ${Math.round((dg.progress || 0) * 100)}%`,
+    processing: 'processing', done: 'ready', failed: 'failed',
+  }[dg.stage] || dg.stage;
+  return ` · Deepgram timing: ${label}`;
 }
 
 // One save in flight at a time. A burst of edits (a review applies several)
@@ -1914,7 +1939,10 @@ if (btnExportTxt) {
 // The key lives in the server's environment, so the browser has to ask.
 // Better to grey the option out with a reason than to fail on click.
 function syncDiarizeUI() {
-  const on = !!(transcribeDiarize && transcribeDiarize.checked);
+  // Speakers alone switches to Deepgram's own transcript; with sharpened
+  // timing on, Whisper still writes the words, so the model choice applies.
+  const on = !!(transcribeDiarize && transcribeDiarize.checked)
+    && !(transcribeSharpen && transcribeSharpen.checked);
   if (transcribeModel) {
     transcribeModel.disabled = on;
     transcribeModel.title = on
@@ -1925,6 +1953,14 @@ function syncDiarizeUI() {
 
 if (transcribeDiarize) {
   transcribeDiarize.addEventListener('change', syncDiarizeUI);
+}
+// Default off, but remembered: Ben may want it on nearly every job.
+if (transcribeSharpen) {
+  transcribeSharpen.checked = localStorage.getItem('sharpenTiming') === 'true';
+  transcribeSharpen.addEventListener('change', () => {
+    localStorage.setItem('sharpenTiming', String(transcribeSharpen.checked));
+    syncDiarizeUI();
+  });
 }
 
 (async function checkEngines() {
@@ -1938,6 +1974,14 @@ if (transcribeDiarize) {
     transcribeDiarize.checked = false;
     transcribeDiarize.disabled = true;
     const row = document.getElementById('diarize-row');
+    if (row) row.classList.add('is-disabled');
+    if (diarizeUnavailable) diarizeUnavailable.classList.remove('hidden');
+  }
+  if (transcribeSharpen && !deepgramReady) {
+    // Leave the saved preference alone; it applies again once a key is set.
+    transcribeSharpen.checked = false;
+    transcribeSharpen.disabled = true;
+    const row = document.getElementById('sharpen-row');
     if (row) row.classList.add('is-disabled');
     if (diarizeUnavailable) diarizeUnavailable.classList.remove('hidden');
   }

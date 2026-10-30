@@ -11,6 +11,10 @@ All backends emit the same shape: a list of {"word", "start", "end"} dicts,
 so the rest of the app doesn't care which ran. Deepgram additionally sets
 "speaker" on each word; the Whisper backends leave it None.
 
+sharpen_timing=True runs both: Whisper for the words, Deepgram (in a second
+thread, at the same time) for the timing, merged by timing_merge.py. If the
+Deepgram half fails the job still completes with Whisper's own timing.
+
 Runs in a background thread so the Flask server stays responsive. Only one
 transcription runs at a time (the model uses ~3 GB VRAM/RAM).
 """
@@ -42,8 +46,14 @@ def start_transcription(
     language: str = "en",
     model: str | None = None,
     engine: str = "whisper",
+    sharpen_timing: bool = False,
+    keep_speakers: bool = False,
 ) -> str:
-    """Start a background transcription job. Returns the job ID."""
+    """Start a background transcription job. Returns the job ID.
+
+    sharpen_timing (Whisper engine only) adds the Deepgram timing pass;
+    keep_speakers then also keeps Deepgram's speaker labels.
+    """
     if not os.path.isfile(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
 
@@ -70,10 +80,19 @@ def start_transcription(
         "stage": "",
         "speakers": 0,
     }
+    sharpen_timing = sharpen_timing and engine != "deepgram"
+    if sharpen_timing:
+        # The Deepgram half reports into its own dict so its progress
+        # doesn't fight Whisper's over job["progress"].
+        _jobs[job_id]["deepgram"] = {"stage": "starting", "progress": 0.0}
+        _jobs[job_id]["timing_stats"] = None
+        _jobs[job_id]["timing_summary"] = ""
+        _jobs[job_id]["timing_warning"] = ""
 
     t = threading.Thread(
         target=_run_transcription,
-        args=(job_id, file_path, language, model, engine),
+        args=(job_id, file_path, language, model, engine,
+              sharpen_timing, keep_speakers),
         daemon=True,
     )
     t.start()
@@ -102,22 +121,98 @@ def is_busy() -> bool:
 
 
 def _run_transcription(
-    job_id: str, file_path: str, language: str, model: str | None, engine: str = "whisper"
+    job_id: str, file_path: str, language: str, model: str | None,
+    engine: str = "whisper", sharpen_timing: bool = False,
+    keep_speakers: bool = False,
 ):
     """Worker function — runs in a background thread."""
     job = _jobs[job_id]
     try:
         if engine == "deepgram":
             _transcribe_with_deepgram(job, file_path, language)
-        elif sys.platform == "darwin":
-            _transcribe_with_mlx(job, file_path, language, model)
+        elif sharpen_timing:
+            _transcribe_sharpened(job, file_path, language, model, keep_speakers)
         else:
-            _transcribe_with_faster_whisper(job, file_path, language, model)
+            _transcribe_with_whisper(job, file_path, language, model)
         job["progress"] = 1.0
         job["status"] = "complete"
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
+
+
+def _transcribe_with_whisper(job: dict, file_path: str, language: str, model: str | None):
+    if sys.platform == "darwin":
+        _transcribe_with_mlx(job, file_path, language, model)
+    else:
+        _transcribe_with_faster_whisper(job, file_path, language, model)
+
+
+# ---------------------------------------------------------------------------
+# Whisper wording + Deepgram timing
+# ---------------------------------------------------------------------------
+
+def _transcribe_sharpened(
+    job: dict, file_path: str, language: str, model: str | None, keep_speakers: bool
+):
+    """Whisper's words with Deepgram's word timing (see timing_merge.py).
+
+    Deepgram runs in its own thread while Whisper works; it is usually done
+    first. Any Deepgram failure leaves Whisper's result in place with a
+    warning for the UI, rather than failing the job.
+    """
+    import deepgram_client
+    import timing_merge
+
+    dg = job["deepgram"]
+    result: dict = {}
+
+    def run_deepgram():
+        try:
+            result["words"] = deepgram_client.transcribe(
+                dg, file_path, language, diarize=keep_speakers
+            )
+            dg["stage"] = "done"
+        except Exception as e:
+            result["error"] = str(e)
+            dg["stage"] = "failed"
+
+    t = threading.Thread(target=run_deepgram, daemon=True)
+    t.start()
+
+    _transcribe_with_whisper(job, file_path, language, model)
+
+    if t.is_alive():
+        job["stage"] = "waiting-deepgram"
+        t.join(deepgram_client.TIMEOUT_S + 60)
+    if t.is_alive():
+        result["error"] = "Deepgram took too long"
+
+    whisper_words = job["words"]
+    dg_words = result.get("words") or []
+    if result.get("error") or not dg_words:
+        why = result.get("error") or "Deepgram returned no words"
+        job["timing_warning"] = (
+            f"Deepgram timing failed: {why.rstrip('.')}. Kept Whisper's own timing."
+        )
+        print(f"[transcriber] timing pass failed: {why}", flush=True)
+    else:
+        job["stage"] = "merging"
+        merged, stats = timing_merge.merge(whisper_words, dg_words, keep_speakers)
+        job["timing_stats"] = stats
+        job["timing_summary"] = timing_merge.summary(stats)
+        if stats["applied"]:
+            job["words"] = merged
+            job["model"] = f"{job.get('model') or 'whisper'} + {deepgram_client.MODEL} timing"
+        else:
+            job["timing_warning"] = job["timing_summary"] + " Kept Whisper's own timing."
+        print(f"[transcriber] timing pass: {stats}", flush=True)
+
+    if keep_speakers:
+        job["speakers"] = len({
+            w["speaker"] for w in job["words"] if w.get("speaker") is not None
+        })
+    job["stage"] = ""
 
 
 # ---------------------------------------------------------------------------

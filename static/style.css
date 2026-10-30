@@ -1157,6 +1157,7 @@ body:not(.view-transcript) #timestamp-toggle {
 .landing-check input { accent-color: var(--accent); cursor: pointer; }
 .landing-check:hover:not(.is-disabled) { color: var(--text); }
 .landing-check.is-disabled { opacity: .45; cursor: default; }
+.landing-check + .landing-check { margin-top: 6px; }
 
 .landing-check-note {
   color: var(--text-faint);

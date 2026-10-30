@@ -206,10 +206,13 @@ def transcribe():
     language = (data or {}).get('language', 'en')
     model = ((data or {}).get('model') or '').strip() or None
     engine = ((data or {}).get('engine') or 'whisper').strip()
+    # Whisper's words with Deepgram's word timing (timing_merge.py).
+    sharpen = bool((data or {}).get('sharpenTiming')) and engine != 'deepgram'
+    speakers = bool((data or {}).get('speakers'))
 
     if not file_path:
         return jsonify({'error': 'No file path provided.'}), 400
-    if engine == 'deepgram' and not deepgram_client.has_api_key():
+    if (engine == 'deepgram' or sharpen) and not deepgram_client.has_api_key():
         return jsonify({
             'error': 'No Deepgram API key configured. Set DEEPGRAM_API_KEY and '
                      'restart the app.'
@@ -217,13 +220,15 @@ def transcribe():
 
     print(
         f"[transcribe] requested: file={os.path.basename(file_path)} "
-        f"engine={engine} model={model or '(default)'}",
+        f"engine={engine} model={model or '(default)'}"
+        f"{' +deepgram-timing' if sharpen else ''}{' +speakers' if sharpen and speakers else ''}",
         flush=True,
     )
 
     try:
         job_id = transcriber.start_transcription(
-            file_path, language, model=model, engine=engine
+            file_path, language, model=model, engine=engine,
+            sharpen_timing=sharpen, keep_speakers=speakers,
         )
         return jsonify({'jobId': job_id})
     except FileNotFoundError as e:

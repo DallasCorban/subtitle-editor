@@ -84,7 +84,7 @@ landing screen runs Deepgram Nova-3 instead, which returns a speaker label
 attached to every word — and is stronger than Whisper on the multi-speaker
 interview audio that actually needs diarizing.
 
-This is the one part of the app that is **not local**: the audio is uploaded
+This (and Sharpen timing, below) is the part of the app that is **not local**: the audio is uploaded
 to Deepgram. The app strips the file down to 16 kHz mono FLAC first, so it
 sends the audio rather than your video master. Batch transcription runs
 about US$0.26/hour with diarization included.
@@ -97,6 +97,39 @@ export DEEPGRAM_API_KEY="your-key-here"      # macOS / Linux
 ```
 
 Without a key the option is greyed out and everything else works as before.
+
+## Sharpen timing with Deepgram
+
+Whisper writes the better words (it keeps every word, writes numbers as
+digits, leaves Australian spelling alone), but its word timings run about
+2 to 3 frames early and now and then put a word boundary a few hundred
+milliseconds out. Deepgram times words more tightly but drops words, spells
+out numbers and uses US spelling. **Sharpen timing with Deepgram** on the
+landing screen takes the best of each: Whisper's words, Deepgram's timing.
+
+What it does: Whisper transcribes as normal while Deepgram runs alongside
+it. Each Whisper word is lined up with Deepgram's (ignoring case,
+punctuation, spelling like cancelled/canceled and numbers like 15th/fifteenth)
+and takes Deepgram's start and end. The words themselves never change.
+Deepgram's time is skipped if it looks wrong: a word stretched over one it
+dropped, a word shorter than 20 ms, or a big move that its neighbours don't
+back up. A word run into the next one is trimmed to where the next begins.
+Words with no trusted time are fitted between their neighbours. The caption
+breaks then come from the new times as usual, and the completion message
+says how many words moved and by how much. If Deepgram fails, you get
+Whisper's own timing and a warning; the job still completes. With
+**Identify speakers** ticked as well, Whisper's words get Deepgram's speaker
+labels. The code is `timing_merge.py`.
+
+What it costs: the audio goes to Deepgram (16 kHz mono, not the video), at
+under 1 US cent a minute: a 3 minute voiceover is about 1 to 2 cents, an
+hour of interview roughly 30 to 50 cents. It adds little time, because
+Deepgram usually finishes before Whisper does.
+
+When to use it: any job where caption timing matters and the audio can
+leave the machine, which is most of them. The box remembers its setting.
+Leave it off for confidential audio that must stay local. On the MECI
+Subscription voiceover it moved 450 of 456 words, typically 60 ms later.
 
 ## AI review: fixing misheard words
 
