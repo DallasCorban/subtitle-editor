@@ -478,12 +478,107 @@ PORT = int(os.environ.get('PORT', 5000))
 
 
 def _open_browser():
+    """Open the editor once the server answers (up to 30 s)."""
+    import socket
     import time
-    time.sleep(1.2)
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(('127.0.0.1', PORT), timeout=1):
+                break
+        except OSError:
+            time.sleep(0.3)
     webbrowser.open(f'http://127.0.0.1:{PORT}')
 
 
+# ---------------------------------------------------------------------------
+# Auto-reload: restart the server when Subtitle's own .py files change, so a
+# code edit needs no manual restart. Werkzeug runs a watcher parent and a
+# serving child; on a change the child exits and the parent starts a fresh
+# one. Set SUBTITLE_NO_RELOAD=1 to turn it off.
+#
+# Only the top-level .py files here are watched. Werkzeug's stock watcher
+# walks the whole of sys.path every second (thousands of site-packages files),
+# and would also pick up the .claude-worktrees copies other sessions edit.
+#
+# A reload drops in-memory state, so it waits until no transcription or
+# review is running and the open tab has collected any queued edits. The
+# tab's live link republishes its document on the next poll after a restart.
+# ---------------------------------------------------------------------------
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+RELOAD_IDLE_S = 5   # quiet this long before reloading (lets the tab fetch results)
+
+
+def _busy_reason():
+    if transcriber.is_busy():
+        return 'a transcription is running'
+    if reviewer.busy():
+        return 'an AI review is running'
+    if live.has_pending():
+        return 'the editor has edits to collect'
+    return ''
+
+
+def _wait_until_idle():
+    import time
+    told = False
+    quiet_since = None
+    while True:
+        why = _busy_reason()
+        if why:
+            quiet_since = None
+            if not told:
+                print(f' * Code changed; reload waits until {why} finishes.', flush=True)
+                told = True
+        elif quiet_since is None:
+            quiet_since = time.time()
+        elif time.time() - quiet_since >= RELOAD_IDLE_S:
+            return
+        time.sleep(1)
+
+
+def _install_reloader():
+    """Register a watcher for our own files with werkzeug. Returns its name."""
+    import glob
+    from werkzeug import _reloader
+
+    class SubtitleReloader(_reloader.StatReloaderLoop):
+        name = 'subtitle'
+
+        def run_step(self):
+            for path in glob.glob(os.path.join(HERE, '*.py')):
+                try:
+                    mtime = os.stat(path).st_mtime
+                except OSError:
+                    continue
+                old = self.mtimes.get(path)
+                if old is None:
+                    self.mtimes[path] = mtime
+                elif mtime > old:
+                    self.trigger_reload(path)
+
+        def trigger_reload(self, filename):
+            _wait_until_idle()
+            super().trigger_reload(filename)
+
+    _reloader.reloader_loops['subtitle'] = SubtitleReloader
+    return 'subtitle'
+
+
 if __name__ == '__main__':
-    if not os.environ.get('SUBTITLE_NO_BROWSER'):
+    use_reloader = not os.environ.get('SUBTITLE_NO_RELOAD')
+    reloader_type = 'stat'
+    if use_reloader:
+        try:
+            reloader_type = _install_reloader()
+        except Exception as e:  # werkzeug internals moved: fall back to its own watcher
+            print(f' * Narrow reloader unavailable ({e}); using werkzeug stat reloader.')
+    # With the reloader on, this file runs in a watcher parent (once) and in
+    # a serving child (WERKZEUG_RUN_MAIN=true, started again on every reload).
+    # Open the browser from the parent, so a reload never opens another window.
+    in_child = os.environ.get('WERKZEUG_RUN_MAIN') == 'true'
+    if not os.environ.get('SUBTITLE_NO_BROWSER') and not in_child:
         threading.Thread(target=_open_browser, daemon=True).start()
-    app.run(host='127.0.0.1', port=PORT, debug=False)
+    app.run(host='127.0.0.1', port=PORT, debug=False,
+            use_reloader=use_reloader, reloader_type=reloader_type)

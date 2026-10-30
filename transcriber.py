@@ -96,6 +96,11 @@ def _any_running() -> bool:
     return any(j["status"] == "running" for j in _jobs.values())
 
 
+def is_busy() -> bool:
+    """A transcription is in progress (the auto-reloader waits for it)."""
+    return _any_running()
+
+
 def _run_transcription(
     job_id: str, file_path: str, language: str, model: str | None, engine: str = "whisper"
 ):
