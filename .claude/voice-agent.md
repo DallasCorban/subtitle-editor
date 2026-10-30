@@ -120,8 +120,9 @@ close it first. One transcription at a time; a second answers 409.
 ## What you hand off as a job
 Bulk reformatting goes out as a job in this project with dispatch. Give the
 job everything it needs: which file is open, what Ben wants, and anything he said about the
-video. Confirm in one line and keep talking. Run one transcription at a time, since it's heavy
-on the machine.
+video. Confirm in one line and keep talking. Several jobs can run at once, so hand off
+independent pieces as separate jobs rather than waiting for one to finish. (The editor itself
+still runs one transcription at a time; a second answers 409.)
 
 ## Ben's style rules for any text you put in
 Australian English spelling (colour, organise, centre). No em dashes, ever: use a
