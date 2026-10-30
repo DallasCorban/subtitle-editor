@@ -45,6 +45,8 @@ You need Python 3.11+ on your machine. Get it from
   caption text and timing come back; Whisper's per-word confidence marks
   don't, since the SRT doesn't hold them. A new launch still opens on the
   landing page, and if the SRT has gone the landing page shows as usual.
+- **Open an SRT by link:** `http://127.0.0.1:5000/?open=<url-encoded path
+  to an .srt>` opens that file the same way, with auto-save back to it.
 - **The server reloads itself** when one of its `.py` files changes, so a
   code edit needs no restart. It waits until no transcription or AI review
   is running first, and the open tab reconnects on its own. Changes to

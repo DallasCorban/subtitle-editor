@@ -1458,14 +1458,26 @@ function rememberOpenSrt(srtPath, transcribed) {
   } catch (e) { /* storage unavailable */ }
 }
 
+// On load: a link like /?open=<path to an .srt> opens that file (how an
+// operator hands Ben a file without the picker); otherwise reopen the SRT
+// this tab had open before a refresh. Both go through /api/load-srt.
 async function restoreOpenSrt() {
+  const url = new URL(location.href);
+  const asked = (url.searchParams.get('open') || '').trim();
+  if (url.searchParams.has('open')) {
+    url.searchParams.delete('open');  // a later refresh then uses sessionStorage
+    history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+  }
   let saved = null;
-  try { saved = JSON.parse(sessionStorage.getItem(OPEN_SRT_KEY)); } catch (e) { /* none */ }
+  const fromLink = /\.srt$/i.test(asked);
+  if (fromLink) saved = { path: asked, transcribed: false };
+  else try { saved = JSON.parse(sessionStorage.getItem(OPEN_SRT_KEY)); } catch (e) { /* none */ }
   if (!saved || !saved.path || cues.length) return;
   try {
     const res = await api('POST', '/api/load-srt', { filePath: saved.path });
     if (res.error || !res.cues || !res.cues.length || cues.length) {
-      if (res.error) rememberOpenSrt(null);  // gone from disk: stay on the landing page
+      if (res.error && fromLink) toast(res.error, 'error', 6000);
+      else if (res.error) rememberOpenSrt(null);  // gone from disk: stay on the landing page
       return;
     }
     openLoadedSrt(saved.path, res);
@@ -2587,5 +2599,5 @@ async function pollReview() {
   reviewSyncButton();
 })();
 
-// After a refresh, reopen the SRT this tab had open (see rememberOpenSrt).
+// Open ?open=<srt>, or after a refresh the SRT this tab had open.
 restoreOpenSrt();
