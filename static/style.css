@@ -1205,16 +1205,19 @@ body:not(.view-transcript) #timestamp-toggle {
   text-decoration-skip-ink: none;
 }
 
-/* The line the call is talking about. */
+/* The line the call is talking about: a faint neutral lift, so the pointed
+   word is what stands out. */
 .word.live-shown {
-  background: rgba(122, 162, 255, .14);
+  background: rgba(255, 255, 255, .07);
 }
 
-/* The word in it the call is pointing at: a soft teal box, so it never
-   reads as the green fix flash, the violet flag or the amber unsure word. */
+/* The word in it the call is pointing at: a solid orange marker with dark
+   text. Strong enough to read against the purple page; the amber unsure
+   word is only an underline, so the two don't clash. */
 .word.live-word {
-  background: rgba(64, 196, 210, .22);
-  box-shadow: 0 0 0 1.5px rgba(64, 196, 210, .75);
+  background: #ff9f1c;
+  color: #14121a;
+  box-shadow: 0 0 0 2px #ff9f1c;
   border-radius: 3px;
 }
 
