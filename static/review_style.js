@@ -1,7 +1,10 @@
 // ── Review style check ─────────────────────────────────────────────────
 // Runs after every AI review, over the whole transcript (the transcriber
 // produces US spellings and dashes on its own too). Two house rules:
-//   1. no em dashes (nor a spaced en dash used as punctuation);
+//   1. no em dashes (nor a spaced en dash used as punctuation), and no
+//      stray hyphens: a standalone " - ", or one stuck to a word on the
+//      spaced side ("pro -Disney+", "pro- Disney+"). Real hyphenated words
+//      (on-demand, 12-month) and negative numbers (-5) are kept;
 //   2. Australian spelling.
 // It's deterministic on purpose: a prompt alone can't be relied on.
 //
@@ -20,7 +23,10 @@
   'use strict';
 
   const ANCHOR = '[.]';
-  const DASHES = new Set(['—', '–', '--']);   // standalone tokens
+  const DASHES = new Set(['—', '–', '--', '-']);   // standalone tokens
+  // A hyphen left hanging before "and"/"or"/"to" is a suspended compound
+  // ("pre- and post-war"), which is real English; keep it.
+  const SUSPENDED = new Set(['and', 'or', 'to']);
 
   // Spellings that are fine in Australia in one sense and not another. Both
   // forms pass en_AU, so only a person can tell; flag every one.
@@ -107,12 +113,13 @@
       for (let i = 0; i < toks.length; i++) {
         const t = toks[i];
         if (DASHES.has(t)) {
+          const reason = t === '-' ? 'style: no stray hyphens' : 'style: no em dashes';
           if (i === 0) {
-            fixes.push({ cue: cue.n, find: t, replace: '', reason: 'style: no em dashes' });
+            fixes.push({ cue: cue.n, find: t, replace: '', reason });
           } else {
             const prev = toks[i - 1];
             const rep = /[,.;:!?]$/.test(prev) ? prev : prev + ',';
-            fixes.push({ cue: cue.n, find: `${prev} ${t}`, replace: rep, reason: 'style: no em dashes' });
+            fixes.push({ cue: cue.n, find: `${prev} ${t}`, replace: rep, reason });
             toks[i - 1] = rep;
           }
           toks.splice(i, 1);
@@ -123,6 +130,17 @@
             .replace(/\s*—+\s*/g, ', ');
           rep = rep.replace(/([,.;:!?]),$/, '$1');
           fixes.push({ cue: cue.n, find: t, replace: rep, reason: 'style: no em dashes' });
+          toks[i] = rep;
+        } else if (/^-+\p{L}/u.test(t) || (/\p{L}-+$/u.test(t) && i < toks.length - 1
+            && !SUSPENDED.has(toks[i + 1].toLowerCase()))) {
+          // Stray hyphen on the spaced side of a word: "pro -Disney+",
+          // "pro- Disney+". The neighbouring word goes in the find so it
+          // can't match inside a real compound earlier in the line.
+          const rep = t.replace(/^-+/, '').replace(/-+$/, '');
+          const lead = t.startsWith('-');
+          const find = lead ? (i ? `${toks[i - 1]} ${t}` : t) : `${t} ${toks[i + 1]}`;
+          const replace = lead ? (i ? `${toks[i - 1]} ${rep}` : rep) : `${rep} ${toks[i + 1]}`;
+          fixes.push({ cue: cue.n, find, replace, reason: 'style: no stray hyphens' });
           toks[i] = rep;
         }
       }
