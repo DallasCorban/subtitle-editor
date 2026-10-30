@@ -139,8 +139,10 @@ class _ProgressReader:
 # Transcription
 # ---------------------------------------------------------------------------
 
-def transcribe(job: dict, file_path: str, language: str = "en") -> list[dict]:
-    """Run a diarized Nova-3 transcription. Returns word dicts with speakers."""
+def transcribe(job: dict, file_path: str, language: str = "en",
+               diarize: bool = True) -> list[dict]:
+    """Run a Nova-3 transcription. Returns word dicts, with speakers when
+    diarize is on (it is an add-on charge, so the timing pass can skip it)."""
     key = api_key()
     if not key:
         raise RuntimeError(
@@ -156,7 +158,7 @@ def transcribe(job: dict, file_path: str, language: str = "en") -> list[dict]:
         params = {
             "model": MODEL,
             "language": language or "en",
-            "diarize": "true",
+            "diarize": "true" if diarize else "false",
             # Punctuation and capitalisation matter far more for a document
             # meant to be read than they do for captions.
             "punctuate": "true",
