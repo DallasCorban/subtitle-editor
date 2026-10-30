@@ -102,7 +102,8 @@ one-line note about what the video is about (remembered per file).
 - **Caption timing doesn't move** and no caption is added or removed, so the
   new SRT still lines up with the version already in Resolve.
 - Afterwards a fixed check enforces the house style over the whole
-  transcript: **no em dashes** (a comma instead) and **Australian spelling**
+  transcript: **no em dashes** (a comma instead), **no stray hyphens**
+  ("pro -Disney+" → "pro Disney+"; on-demand stays) and **Australian spelling**
   (color → colour, organize → organise, center → centre). It only changes a
   word when the Australian dictionary accepts the result; unclear ones
   (licence or license, metre or meter) and captions now over the line limit

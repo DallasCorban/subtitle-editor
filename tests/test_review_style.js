@@ -103,6 +103,41 @@ test('every dash form goes, with a comma where needed', () => {
   assert.ok(fixes.every(f => f.reason.startsWith('style:')));
 });
 
+test('stray hyphens go, real hyphenated words stay', () => {
+  const cues = [
+    { n: 1, text: 'Definitely pro -Disney+.' },
+    { n: 2, text: 'the S -Pod model' },
+    { n: 3, text: 'Definitely pro- Disney+.' },
+    { n: 4, text: 'it was big - really big' },
+    { n: 5, text: 'it was big, - really big' },
+    { n: 6, text: '- leading hyphen' },
+    { n: 7, text: '-Leading word' },
+    { n: 8, text: 'a pro-choice and pro- Disney+ view' },
+    { n: 9, text: 'pre- and post-war, about -5 degrees' },
+  ];
+  const { fixes, flags } = S.check(cues, au, us);
+  assert.deepStrictEqual(apply(cues, fixes), [
+    'Definitely pro Disney+.',
+    'the S Pod model',
+    'Definitely pro Disney+.',
+    'it was big, really big',
+    'it was big, really big',
+    'leading hyphen',
+    'Leading word',
+    'a pro-choice and pro Disney+ view',
+    'pre- and post-war, about -5 degrees',
+  ]);
+  assert.ok(fixes.every(f => f.reason === 'style: no stray hyphens'));
+  assert.deepStrictEqual(flags, []);
+});
+
+test('real hyphenated words are kept', () => {
+  const keep = 'on-demand well-known co-founder 12-month Disney+ tiers self-made '
+    + 'twenty-one up-to-date e-commerce x-ray long-term one-on-one';
+  const { fixes, lines } = S.check([{ n: 1, text: keep }], au, us);
+  assert.deepStrictEqual([fixes, lines], [[], []]);
+});
+
 test('whole changed lines match the fixes applied in order', () => {
   const cues = [
     { n: 1, text: 'the color — and the Color' },
