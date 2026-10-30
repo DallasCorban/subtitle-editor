@@ -2111,6 +2111,7 @@ var live = {
   publishTimer: null,
   focusCue: null,      // the line Ben's caret is on (or the call last showed)
   shownCue: null,      // the line the call asked to show, outlined
+  shownWord: null,     // { cue, k, len }: word(s) in it the call pointed at
   flags: [],
   flagsVersion: null,
   undo: [],            // [{ words, breaks, names, sig }] — voice edits only
@@ -2222,6 +2223,15 @@ function liveDecorate() {
     for (let i = r.s; i < r.e; i++) {
       const span = spanAt(i);
       if (span) span.classList.add('live-shown');
+    }
+  }
+
+  const sw = live.shownWord;
+  if (sw && ranges[sw.cue - 1]) {
+    const r = ranges[sw.cue - 1];
+    for (let i = r.s + sw.k; i < Math.min(r.s + sw.k + sw.len, r.e); i++) {
+      const span = spanAt(i);
+      if (span) span.classList.add('live-word');
     }
   }
 
@@ -2377,6 +2387,34 @@ function liveApplySpeaker(op) {
   return { ok: true, text: name, was };
 }
 
+// Letters and digits only, so "Disney+," matches "disney" and "I'm" matches "im".
+function liveBare(w) { return String(w).toLowerCase().replace(/[^\p{L}\p{N}]/gu, ''); }
+
+// Where in caption r the call's {word} (one word or a short phrase, first
+// match) or {index} (0-based) is: { k, len }, or { reason } if it isn't.
+function liveFindWord(r, op) {
+  const n = r.e - r.s;
+  if (op.word != null && String(op.word).trim()) {
+    const want = String(op.word).trim().split(/\s+/).map(liveBare).filter(Boolean);
+    if (!want.length) return { reason: 'which word?' };
+    const got = allWords.slice(r.s, r.e).map(w => liveBare(w.word));
+    for (let k = 0; k + want.length <= n; k++) {
+      if (want.every((t, j) => got[k + j] === t)) return { k, len: want.length };
+    }
+    return { reason: `"${op.word}" isn't in that line` };
+  }
+  const k = Number(op.index);
+  if (!Number.isInteger(k) || k < 0 || k >= n) {
+    return { reason: `that line has ${n} words (index 0 to ${n - 1})` };
+  }
+  return { k, len: 1 };
+}
+
+function liveClearShownWord() {
+  live.shownWord = null;
+  container.querySelectorAll('.word.live-word').forEach(sp => sp.classList.remove('live-word'));
+}
+
 function liveApplyFocus(op) {
   const ranges = liveCueRanges();
   const n = Number(op.cue);
@@ -2385,11 +2423,26 @@ function liveApplyFocus(op) {
   live.shownCue = n;
   live.focusCue = n;
   container.querySelectorAll('.word.live-shown').forEach(sp => sp.classList.remove('live-shown'));
+  liveClearShownWord();
+  // The whole line is still shown when the word isn't there, so Ben can look.
+  let miss = null;
+  if (op.word != null || op.index != null) {
+    const hit = liveFindWord(r, op);
+    if (hit.reason) miss = hit.reason;
+    else live.shownWord = { cue: n, k: hit.k, len: hit.len };
+  }
   liveDecorate();
-  const span = container.querySelector(`.word[data-idx="${r.s}"]`);
+  const at = live.shownWord ? r.s + live.shownWord.k : r.s;
+  const span = container.querySelector(`.word[data-idx="${at}"]`);
   if (span) span.scrollIntoView({ block: 'center', behavior: 'smooth' });
   livePublishSoon();
-  return { ok: true, cue: n, text: liveCueText(r) };
+  if (miss) return { ok: false, reason: miss, cue: n, text: liveCueText(r) };
+  const res = { ok: true, cue: n, text: liveCueText(r) };
+  if (live.shownWord) {
+    res.was = allWords.slice(r.s + live.shownWord.k, r.s + live.shownWord.k + live.shownWord.len)
+      .map(w => w.word).join(' ');
+  }
+  return res;
 }
 
 // Undo the last voice edit — only while nothing else has changed since,
@@ -2413,6 +2466,7 @@ function liveUndoLast() {
 function liveApply(op) {
   try {
     if (op.op === 'focus') return liveApplyFocus(op);
+    if (op.op === 'toast') { toast(String(op.text || ''), 'info', 3500); return { ok: true }; }
     if (!allWords.length) return { ok: false, reason: 'no transcript open' };
     liveFlushTyping();
     if (op.op === 'review') return reviewLiveOp(op);
@@ -2486,6 +2540,11 @@ document.addEventListener('keydown', (e) => {
   e.preventDefault();
   const r = liveUndoLast();
   if (r.ok) toast('Voice fix undone.', 'success', 1500);
+}, true);
+
+// The pointed-at word is for looking at: it goes as soon as Ben types.
+document.addEventListener('input', (e) => {
+  if (live.shownWord && container.contains(e.target)) liveClearShownWord();
 }, true);
 
 window.addEventListener('pagehide', () => {

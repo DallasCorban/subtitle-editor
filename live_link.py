@@ -30,7 +30,8 @@ MAX_WAIT_S = 8
 TEXT_OPS = ('replace', 'set')
 # 'review' brackets a review job's edits (start/end) so the tab can snapshot
 # for Undo all and run its style check afterwards. No text guard.
-ALL_OPS = TEXT_OPS + ('focus', 'speaker', 'undo', 'review')
+# 'toast' shows a short note in the tab (e.g. where the Resolve playhead went).
+ALL_OPS = TEXT_OPS + ('focus', 'speaker', 'undo', 'review', 'toast')
 
 
 class LiveLink:
@@ -205,7 +206,7 @@ class LiveLink:
                     continue
                 item = {'id': next(self._ids), 'op': op}
                 for k in ('cue', 'find', 'replace', 'text', 'speaker', 'name', 'flag', 'note',
-                          'phase', 'summary', 'job', 'count'):
+                          'phase', 'summary', 'job', 'count', 'word', 'index'):
                     if raw.get(k) is not None:
                         item[k] = raw[k]
                 if op in TEXT_OPS:

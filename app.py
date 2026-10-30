@@ -194,6 +194,41 @@ def resolve_read():
     return jsonify(result)
 
 
+@app.route('/api/resolve/playhead', methods=['POST'])
+def resolve_playhead():
+    """Move Ben's Resolve playhead to a caption ({cue}) or an SRT time
+    ({timecode: '00:01:23,456'}). {toast: true} also tells the open tab."""
+    body = request.get_json(silent=True) or {}
+    text = ''
+    if body.get('cue') not in (None, ''):
+        try:
+            n = int(body['cue'])
+        except (TypeError, ValueError):
+            return jsonify({'ok': False, 'error': 'cue must be a line number'}), 400
+        doc = live.doc(n, n)
+        if not doc.get('open'):
+            return jsonify({'ok': False, 'error': 'No transcript is open in the Subtitle editor.'}), 400
+        if not doc['cues']:
+            return jsonify({'ok': False, 'error': f'There is no line {n}.'}), 400
+        time_str, text = doc['cues'][0]['start'], doc['cues'][0]['text']
+    elif body.get('timecode') not in (None, ''):
+        time_str = body['timecode']
+    else:
+        return jsonify({'ok': False, 'error': 'Give a cue (line number) or a timecode.'}), 400
+    try:
+        seconds = resolve_bridge.srt_time_to_seconds(time_str)
+    except ValueError:
+        return jsonify({'ok': False, 'error': f'Not a time: {time_str!r}'}), 400
+
+    result = resolve_bridge.move_playhead(seconds, text)
+    if body.get('cue') not in (None, ''):
+        result['cue'] = int(body['cue'])
+    result['srtTime'] = time_str
+    if result.get('ok') and body.get('toast') and live.is_open():
+        live.submit([{'op': 'toast', 'text': f"Playhead moved to {result['timecode']}"}], wait=0)
+    return jsonify(result)
+
+
 # ---------------------------------------------------------------------------
 # Whisper transcription
 # ---------------------------------------------------------------------------
@@ -411,7 +446,12 @@ def live_edits():
 @app.route('/api/live/focus', methods=['POST'])
 def live_focus():
     body = request.get_json(silent=True) or {}
-    return jsonify(live.submit([{'op': 'focus', 'cue': body.get('cue')}], wait=_wait_arg(body)))
+    op = {'op': 'focus', 'cue': body.get('cue')}
+    # Optional: just one word of the line, by its text or 0-based position.
+    for k in ('word', 'index'):
+        if body.get(k) not in (None, ''):
+            op[k] = body[k]
+    return jsonify(live.submit([op], wait=_wait_arg(body)))
 
 
 @app.route('/api/live/speaker', methods=['POST'])
