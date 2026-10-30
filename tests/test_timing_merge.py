@@ -212,6 +212,43 @@ class Synthetic(unittest.TestCase):
         out, _ = timing_merge.merge(ws, ds, keep_speakers=True)
         self.assertEqual([x["speaker"] for x in out], [0, 0, 0, 1])
 
+    def test_dropped_word_at_a_speaker_change_goes_by_time(self):
+        # Deepgram missed "Well," at the start of speaker 1's reply. It used
+        # to inherit speaker 0 from the word before; by time it is speaker 1.
+        ws = [w("Over", 0.0, 0.3), w("to", 0.3, 0.45), w("you.", 0.45, 0.8),
+              w("Well,", 1.6, 1.9), w("thanks", 1.95, 2.3), w("Pete.", 2.3, 2.7)]
+        ds = [w("Over", 0.0, 0.3, 0), w("to", 0.3, 0.45, 0), w("you.", 0.45, 0.8, 0),
+              w("thanks", 1.95, 2.3, 1), w("Pete.", 2.3, 2.7, 1)]
+        out, _ = timing_merge.merge(ws, ds, keep_speakers=True)
+        self.assertEqual([x["speaker"] for x in out], [0, 0, 0, 1, 1, 1])
+
+    def test_one_word_speaker_flicker_is_smoothed(self):
+        # Diarisation flipped "really" to speaker 1 mid-sentence, no pause.
+        ws = [w(t, i * 0.3, i * 0.3 + 0.28) for i, t in
+              enumerate("I really think that works.".split())]
+        ds = [w(x["word"], x["start"], x["end"], sp) for x, sp in zip(ws, [0, 1, 0, 0, 0])]
+        out, _ = timing_merge.merge(ws, ds, keep_speakers=True)
+        self.assertEqual([x["speaker"] for x in out], [0] * 5)
+
+    def test_one_word_reply_is_kept(self):
+        # "Yeah." from the other speaker, with pauses round it, is real.
+        words = [w("works.", 0.0, 0.4, 0), w("Yeah.", 0.9, 1.2, 1), w("And", 1.8, 2.0, 0),
+                 w("so", 2.0, 2.2, 0)]
+        self.assertEqual(timing_merge.smooth_speaker_blips(words), 0)
+        self.assertEqual([x["speaker"] for x in words], [0, 1, 0, 0])
+        # Even without the pauses, punctuation marks it as its own utterance.
+        tight = [w("works", 0.0, 0.4, 0), w("yeah,", 0.4, 0.6, 1), w("and", 0.6, 0.8, 0)]
+        self.assertEqual(timing_merge.smooth_speaker_blips(tight), 0)
+        # Two words of the other speaker are a real turn, not a flicker.
+        two = [w("so", 0.0, 0.2, 0), w("I", 0.2, 0.3, 1), w("mean", 0.3, 0.5, 1),
+               w("it", 0.5, 0.6, 0)]
+        self.assertEqual(timing_merge.smooth_speaker_blips(two), 0)
+
+    def test_smoothing_leaves_whisper_words_alone(self):
+        words = [w("a", 0, 0.1), w("b", 0.1, 0.2), w("c", 0.2, 0.3)]
+        self.assertEqual(timing_merge.smooth_speaker_blips(words), 0)
+        self.assertEqual([x["speaker"] for x in words], [None] * 3)
+
 
 class SharpenedJob(unittest.TestCase):
     """transcriber's Whisper + Deepgram job, with both engines mocked."""

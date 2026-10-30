@@ -998,6 +998,9 @@ body:not(.view-transcript) #timestamp-toggle {
 }
 .toggle-inline:hover { color: var(--text-2); }
 .toggle-inline input { accent-color: var(--accent); cursor: pointer; }
+/* A checkbox among the stacked settings in the Auto-format popover */
+.setting-check { padding: 2px 0; white-space: normal; }
+.setting-check[hidden] { display: none; }
 
 /* ═══════════════════════════════════════════════════════════════════════
    TRANSCRIPT DOCUMENT — what gets handed to someone else

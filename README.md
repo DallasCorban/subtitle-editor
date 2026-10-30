@@ -110,6 +110,22 @@ export DEEPGRAM_API_KEY="your-key-here"      # macOS / Linux
 
 Without a key the option is greyed out and everything else works as before.
 
+**Captions follow the speakers.** With speaker labels on the words, a new
+caption always starts where a different person starts talking, so no caption
+holds two voices (a one-word reply gets its own caption). It applies to the
+first set of breaks and to **Apply formatting**; untick **Break at speaker
+changes** in the Auto-format popover to let captions run across a change
+(remembered). The box only shows when the transcript has more than one
+speaker; Whisper transcripts break exactly as before. Reassigning a paragraph
+in the Transcript view adds a caption break at its edges, and a word typed or
+added by the live link at the start of a caption belongs to the speaker of
+that caption, not the one before it.
+
+Diarization sometimes flips a single word mid-sentence to the other speaker.
+That word is given back to the speaker either side of it when it is clearly a
+flicker: same speaker both sides, mid-sentence, no pause either side, and no
+punctuation of its own. A real one-word reply ("Yeah.") is left alone.
+
 ## Sharpen timing with Deepgram
 
 Whisper writes the better words (it keeps every word, writes numbers as
@@ -131,7 +147,9 @@ breaks then come from the new times as usual, and the completion message
 says how many words moved and by how much. If Deepgram fails, you get
 Whisper's own timing and a warning; the job still completes. With
 **Identify speakers** ticked as well, Whisper's words get Deepgram's speaker
-labels. The code is `timing_merge.py`.
+labels: a word Deepgram dropped right at a change of speaker goes to whoever
+was talking at that moment, rather than always to the previous speaker. The
+code is `timing_merge.py`.
 
 What it costs: the audio goes to Deepgram (16 kHz mono, not the video), at
 under 1 US cent a minute: a 3 minute voiceover is about 1 to 2 cents, an
@@ -185,7 +203,10 @@ HTTP on the app's port (5000, or `PORT`):
 | `GET /api/review/transcript` | the open transcript numbered exactly as Claude sees it |
 | `POST /api/review/apply {edits, summary?}` | apply swaps you worked out yourself, with the same checks and highlights |
 
-Tests: `py -m unittest discover tests` and `node tests/test_review_style.js`.
+Tests: `py -m unittest discover tests`, `node tests/test_review_style.js` and
+`node tests/test_caption_breaks.js`. `tests/browser_speaker_breaks.js` drives
+the editor in headless Chrome against a spare server on port 5001 (setup in
+the file).
 
 ## DaVinci Resolve integration
 

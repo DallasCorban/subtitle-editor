@@ -71,6 +71,10 @@
             <option value="split">Split into separate cues</option>
           </select>
         </label>
+        <label id="break-at-speakers-row" class="toggle-inline setting-check" hidden title="Start a new caption whenever a different person starts talking. Applies when formatting.">
+          <input id="break-at-speakers" type="checkbox" checked>
+          <span>Break at speaker changes</span>
+        </label>
         <button id="btn-auto-format" class="btn-primary">Apply formatting</button>
       </div>
     </div>
@@ -211,6 +215,7 @@
 
 <script src="/static/vendor/typo.js"></script>
 <script src="/static/review_style.js?v=2"></script>
-<script src="/static/app.js?v=31"></script>
+<script src="/static/caption_breaks.js?v=1"></script>
+<script src="/static/app.js?v=32"></script>
 </body>
 </html>

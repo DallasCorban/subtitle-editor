@@ -241,9 +241,12 @@ def _transcribe_sharpened(
 
 def _transcribe_with_deepgram(job: dict, file_path: str, language: str):
     import deepgram_client
+    import timing_merge
 
     job["model"] = deepgram_client.MODEL
     words = deepgram_client.transcribe(job, file_path, language)
+    # A one-word flicker of the other speaker would cost a one-word caption.
+    timing_merge.smooth_speaker_blips(words)
     job["words"] = words
     job["speakers"] = len({
         w["speaker"] for w in words if w.get("speaker") is not None

@@ -20,6 +20,10 @@ let maxChars = parseInt(localStorage.getItem('maxChars'), 10)
 // Hold a cue through silences up to this many seconds before letting it cut out
 let pauseTolerance = parseFloat(localStorage.getItem('pauseTolerance')) || 2.0;
 
+// With speaker ids on the words (Deepgram), start a new caption whenever the
+// speaker changes. Whisper-only words carry no speaker, so this does nothing.
+let breakAtSpeakers = localStorage.getItem('breakAtSpeakers') !== 'false';
+
 // Which view is on screen: 'captions' (the SRT editor) or 'transcript'
 // (speaker-separated prose for handing to someone else).
 let viewMode = localStorage.getItem('viewMode') === 'transcript' ? 'transcript' : 'captions';
@@ -57,6 +61,8 @@ const btnPushResolve   = document.getElementById('btn-push-resolve');
 const maxCharsInput    = document.getElementById('max-chars');
 const formatModeSelect = document.getElementById('format-mode');
 const pauseToleranceInput = document.getElementById('pause-tolerance');
+const breakAtSpeakersInput = document.getElementById('break-at-speakers');
+const breakAtSpeakersRow = document.getElementById('break-at-speakers-row');
 const resolvePill      = document.getElementById('resolve-pill');
 const resolveLabel     = document.getElementById('resolve-label');
 const container        = document.getElementById('cue-list-container');
@@ -275,97 +281,11 @@ function loadTranscriptionWords(words) {
   render();
 }
 
-// Words a cue shouldn't end on — articles, conjunctions, prepositions,
-// auxiliaries, possessives. Ending a cue here splits a phrase mid-thought
-// ("she went to the / shops" reads badly; "she went / to the shops" is fine).
-const WEAK_TAIL = new Set([
-  'a', 'an', 'the', 'and', 'but', 'or', 'nor', 'of', 'to', 'in', 'on', 'at',
-  'by', 'for', 'with', 'from', 'as', 'into', 'onto', 'over', 'under', 'than',
-  'that', 'which', 'who', 'whose', 'whom', 'if', 'so', 'because', 'while',
-  'when', 'where', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am',
-  'has', 'have', 'had', 'will', 'would', 'can', 'could', 'should', 'shall',
-  'may', 'might', 'must', 'not', 'very', 'quite', 'their', 'his', 'her',
-  'its', 'my', 'your', 'our', 'this', 'these', 'those', 'each', 'every',
-  'some', 'any', 'no', "i'm", "we're", "you're", "it's", "he's", "she's",
-  "they're", "there's", "that's", "what's", "don't", "doesn't", "isn't",
-  "aren't", "won't", "can't",
-]);
-
-function _bareWord(w) {
-  return w.toLowerCase().replace(/[^a-z']/g, '');
-}
-
-// Find break positions by minimizing a global cost over all possible
-// segmentations (dynamic programming), instead of greedily cutting when a
-// line fills up. Each candidate cue is scored on:
-//   • boundary quality — real audio pauses, sentence/clause punctuation,
-//     and never stranding a weak connective word at the end of a cue
-//   • line fill — prefer comfortably full lines for the chosen aspect
-//     ratio over ragged short ones
-//   • rhythm — penalize blink-and-miss cues (<0.8s) and long silences
-//     trapped inside a cue
+// The break optimiser itself lives in static/caption_breaks.js (pure, so
+// node can test it). This wrapper adds the user's speaker-change setting.
+const _bareWord = CaptionBreaks.bareWord;
 function computeSmartBreaks(words, limit) {
-  const n = words.length;
-  if (n <= 1) return [];
-
-  // segLen(i, j) = characters of words[i..j) joined with single spaces
-  const prefix = new Float64Array(n + 1);
-  for (let i = 0; i < n; i++) prefix[i + 1] = prefix[i] + words[i].word.length;
-  const segLen = (i, j) => (prefix[j] - prefix[i]) + (j - i - 1);
-
-  // Quality of ending a cue just before words[k]; lower = better.
-  function boundaryCost(k) {
-    if (k >= n) return -8;  // the very end of the transcript is always fine
-    const prev = words[k - 1];
-    const next = words[k];
-    let cost = 0;
-    if (/[.!?…]["')\]]*$/.test(prev.word)) cost -= 14;        // sentence end
-    else if (/[,;:—–]["')\]]*$/.test(prev.word)) cost -= 7;   // clause end
-    const gap = (next.start ?? 0) - (prev.end ?? 0);
-    if (gap > 0) cost -= Math.min(12, gap * 10);              // spoken pause
-    if (WEAK_TAIL.has(_bareWord(prev.word))) cost += 11;      // stranded connective
-    return cost;
-  }
-
-  // Cost of one cue spanning words[i..j).
-  function cueCost(i, j) {
-    const len = segLen(i, j);
-    // A cue must fit on one line — unless it's a single unbreakable word.
-    if (len > limit && j - i > 1) return Infinity;
-
-    let cost = 0;
-    const fill = Math.min(1, len / limit);
-    cost += (1 - fill) * (1 - fill) * 18;                     // underfilled line
-
-    const dur = (words[j - 1].end ?? 0) - (words[i].start ?? 0);
-    if (dur < 0.8) cost += 8;                                 // flashes too fast
-    if (j - i === 1) cost += 6;                               // lone-word cue
-
-    // Long silence trapped inside the cue → text lingers over dead air
-    for (let k = i + 1; k < j; k++) {
-      const g = (words[k].start ?? 0) - (words[k - 1].end ?? 0);
-      if (g > 1.0) cost += Math.min(12, (g - 1.0) * 6);
-    }
-    return cost + boundaryCost(j);
-  }
-
-  // best[j] = minimal cost to segment words[0..j)
-  const best = new Float64Array(n + 1).fill(Infinity);
-  const back = new Int32Array(n + 1).fill(-1);
-  best[0] = 0;
-  for (let j = 1; j <= n; j++) {
-    for (let i = j - 1; i >= 0; i--) {
-      if (segLen(i, j) > limit && j - i > 1) break;  // longer spans only get worse
-      const c = best[i] + cueCost(i, j);
-      if (c < best[j]) { best[j] = c; back[j] = i; }
-    }
-  }
-
-  const breaks = [];
-  for (let j = n; j > 0; j = back[j]) {
-    if (back[j] > 0) breaks.push(back[j]);
-  }
-  return breaks.reverse();
+  return CaptionBreaks.computeSmartBreaks(words, limit, { breakAtSpeakers });
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -389,6 +309,10 @@ function render() {
   btnSaveAs.disabled           = !cues.length;
   btnAutoFormatToggle.disabled = !cues.length;
   btnAutoFormat.disabled       = !cues.length;
+  if (breakAtSpeakersRow) {
+    // Only worth showing when there is more than one speaker to break between.
+    breakAtSpeakersRow.hidden = !CaptionBreaks.speakerChanges(allWords).length;
+  }
   btnReadResolve.disabled      = !resolveOk;
   btnPushResolve.disabled      = !cues.length;
   reviewSyncButton();
@@ -784,7 +708,10 @@ function lcsDiff(oldArr, newArr) {
 // Rebuild allWords from old words + new tokens, preserving timing/resolveId
 // for kept words, carrying it across in-place replacements (typo fixes),
 // and interpolating timing for inserts.
-function reconcileWords(oldWords, newTokens) {
+//
+// cueStarts (optional): new-token indices that start a caption. A word
+// inserted there belongs to the caption it opens, not the one before.
+function reconcileWords(oldWords, newTokens, cueStarts = null) {
   const oldStrings = oldWords.map(w => w.word);
   const ops = lcsDiff(oldStrings, newTokens);
 
@@ -858,9 +785,18 @@ function reconcileWords(oldWords, newTokens) {
   }
 
   // A word typed into the middle of someone's paragraph belongs to that
-  // someone — inherit the speaker of the word it follows.
-  for (let k = 1; k < result.length; k++) {
-    if (result[k].speaker == null) result[k].speaker = result[k - 1].speaker;
+  // someone — inherit the speaker of the word it follows. At the start of a
+  // caption it takes the speaker of the words after it instead, so typing at
+  // the start of a reply doesn't hand the word to the previous speaker.
+  const anySpeaker = result.some(w => w.speaker != null);
+  for (let k = 0; anySpeaker && k < result.length; k++) {
+    if (result[k].speaker != null) continue;
+    if (k === 0 || (cueStarts && cueStarts.has(k))) {
+      const next = result.slice(k + 1).find(w => w.speaker != null);
+      result[k].speaker = next ? next.speaker : (k > 0 ? result[k - 1].speaker : null);
+    } else {
+      result[k].speaker = result[k - 1].speaker;
+    }
   }
 
   return result;
@@ -891,7 +827,7 @@ function reconcileFromDOM() {
     return;
   }
 
-  allWords = reconcileWords(allWords, tokens);
+  allWords = reconcileWords(allWords, tokens, new Set(breaks));
   breakPositions = [...new Set(breaks)]
     .filter(b => b > 0 && b < allWords.length)
     .sort((a, b) => a - b);
@@ -1153,14 +1089,16 @@ function reconcileTranscriptFromDOM() {
   if (!bodies.length) return;
 
   const tokens = [];
+  const paraStarts = new Set();
   bodies.forEach(b => {
+    paraStarts.add(tokens.length);
     (b.textContent || '').split(/\s+/).filter(Boolean).forEach(t => tokens.push(t));
   });
 
   if (!tokens.length) return;  // don't let a stray select-all-delete wipe the file
   if (tokens.join(' ') === allWords.map(w => w.word).join(' ')) return;
 
-  allWords = reconcileWords(allWords, tokens);
+  allWords = reconcileWords(allWords, tokens, paraStarts);
   // Caption breaks are indices into allWords, so an insert or delete here
   // shifts everything after it. Typo fixes (equal-length replacements) keep
   // them exact; after heavier edits, re-run Auto-format in the caption view.
@@ -1259,9 +1197,22 @@ function assignParagraph(para, speakerId) {
   for (let i = para.startIdx; i <= para.endIdx; i++) {
     allWords[i].speaker = speakerId;
   }
+  const added = addSpeakerBreaks();
+  cues = flatModelToCues();
   closeSpeakerMenu();
   render();
   setStatus(`Paragraph assigned to ${speakerLabel(speakerId)}.`);
+  if (added) autoSaveSRT(true);
+}
+
+// With "Break at speaker changes" on, make sure every change of speaker
+// starts a caption, leaving all the other breaks where they are.
+// Returns how many breaks it added.
+function addSpeakerBreaks() {
+  if (!breakAtSpeakers) return 0;
+  const add = CaptionBreaks.speakerChanges(allWords).filter(k => !breakPositions.includes(k));
+  if (add.length) breakPositions = [...breakPositions, ...add].sort((a, b) => a - b);
+  return add.length;
 }
 
 // ── Export ─────────────────────────────────────────────────────────────
@@ -1382,6 +1333,15 @@ maxCharsInput.addEventListener('change', () => {
   }
 });
 formatModeSelect.addEventListener('change', () => { autoFormatMode = formatModeSelect.value; });
+
+// Applies at the next re-break: Apply formatting, or a fresh transcription
+if (breakAtSpeakersInput) {
+  breakAtSpeakersInput.checked = breakAtSpeakers;
+  breakAtSpeakersInput.addEventListener('change', () => {
+    breakAtSpeakers = breakAtSpeakersInput.checked;
+    localStorage.setItem('breakAtSpeakers', String(breakAtSpeakers));
+  });
+}
 
 // Pause tolerance applies live — rebuild cues with the new value
 if (pauseToleranceInput) {
@@ -2285,7 +2245,8 @@ function liveApplyCueTokens(r, tokens, note = null) {
   const hi = Math.min(allWords.length, r.e + 1);
   const before = r.s > lo ? [allWords[lo].word] : [];
   const after = hi > r.e ? [allWords[r.e].word] : [];
-  const merged = reconcileWords(allWords.slice(lo, hi), [...before, ...tokens, ...after]);
+  const merged = reconcileWords(allWords.slice(lo, hi), [...before, ...tokens, ...after],
+    new Set([before.length]));
   const slice = merged.slice(before.length, merged.length - after.length);
   if (note) {
     // Only the words that actually changed carry the note. The line before
